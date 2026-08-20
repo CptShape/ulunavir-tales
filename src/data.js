@@ -757,18 +757,6 @@ async function fetchStoryBundle(db, storyId) {
     story.arcIds ?? [],
   )) {
     const preparedArc = ensureArcPhasesData(item);
-    if (JSON.stringify({
-      chapterIds: item.chapterIds ?? [],
-      phases: item.phases ?? [],
-    }) !== JSON.stringify({
-      chapterIds: preparedArc.chapterIds,
-      phases: preparedArc.phases,
-    })) {
-      await updateDoc(doc(db, "arcs", item.id), {
-        chapterIds: preparedArc.chapterIds,
-        phases: preparedArc.phases,
-      });
-    }
     arcs.push(preparedArc);
   }
 
@@ -925,19 +913,6 @@ function createFirebaseAdapter(authClient) {
       const arc = rawArc ? ensureArcPhasesData(rawArc) : null;
       if (!arc) {
         return null;
-      }
-
-      if (JSON.stringify({
-        chapterIds: rawArc.chapterIds ?? [],
-        phases: rawArc.phases ?? [],
-      }) !== JSON.stringify({
-        chapterIds: arc.chapterIds,
-        phases: arc.phases,
-      })) {
-        await updateDoc(doc(db, "arcs", arcId), {
-          chapterIds: arc.chapterIds,
-          phases: arc.phases,
-        });
       }
 
       const chapterSnapshots = await getDocs(query(collection(db, "chapters"), where("arcId", "==", arcId)));
