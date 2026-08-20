@@ -735,7 +735,9 @@ function createFirebaseAdapter(authClient) {
         phases: arc.phases.map((phase) => ({
           ...phase,
           chapters: sortByIdOrder(
-            chapterSnapshots.docs.map((item) => ({ id: item.id, ...item.data(), assets: item.data().assets ?? [] })),
+            chapterSnapshots.docs
+              .map((item) => ({ id: item.id, ...item.data(), assets: item.data().assets ?? [] }))
+              .filter((chapter) => (phase.chapterIds ?? []).includes(chapter.id)),
             phase.chapterIds ?? [],
           ),
         })),
