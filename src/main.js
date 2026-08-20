@@ -538,11 +538,33 @@ function renderMarkdown(markdown) {
     .join("");
 }
 
+function normalizeDateValue(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value.toDate === "function") {
+    return value.toDate();
+  }
+
+  if (typeof value.seconds === "number") {
+    return new Date(value.seconds * 1000);
+  }
+
+  return new Date(value);
+}
+
 function formatDate(value) {
+  const date = normalizeDateValue(value);
+
+  if (!date || Number.isNaN(date.getTime())) {
+    return "Unknown date";
+  }
+
   return new Intl.DateTimeFormat("en", {
     dateStyle: "medium",
     timeStyle: "short",
-  }).format(new Date(value));
+  }).format(date);
 }
 
 function byQuery(items, query, accessor) {
