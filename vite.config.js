@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  base: "/ulunavir-tales/",
   server: {
     port: 5173,
   },
