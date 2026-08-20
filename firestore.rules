@@ -1,0 +1,53 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownsStory(storyId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/stories/$(storyId)).data.creatorId == request.auth.uid;
+    }
+
+    function ownsArc(arcId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/arcs/$(arcId)).data.storyId is string
+        && ownsStory(get(/databases/$(database)/documents/arcs/$(arcId)).data.storyId);
+    }
+
+    match /users/{userId} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /stories/{storyId} {
+      allow read: if resource.data.visibility == "public"
+        || resource.data.visibility == "unlisted"
+        || (signedIn() && resource.data.creatorId == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.creatorId == request.auth.uid;
+      allow update, delete: if signedIn() && resource.data.creatorId == request.auth.uid;
+    }
+
+    match /arcs/{arcId} {
+      allow read: if exists(/databases/$(database)/documents/stories/$(resource.data.storyId))
+        && (
+          get(/databases/$(database)/documents/stories/$(resource.data.storyId)).data.visibility == "public"
+          || get(/databases/$(database)/documents/stories/$(resource.data.storyId)).data.visibility == "unlisted"
+          || ownsStory(resource.data.storyId)
+        );
+      allow create: if signedIn() && ownsStory(request.resource.data.storyId);
+      allow update, delete: if ownsArc(arcId);
+    }
+
+    match /chapters/{chapterId} {
+      allow read: if exists(/databases/$(database)/documents/arcs/$(resource.data.arcId))
+        && (
+          get(/databases/$(database)/documents/stories/$(get(/databases/$(database)/documents/arcs/$(resource.data.arcId)).data.storyId)).data.visibility == "public"
+          || get(/databases/$(database)/documents/stories/$(get(/databases/$(database)/documents/arcs/$(resource.data.arcId)).data.storyId)).data.visibility == "unlisted"
+          || ownsArc(resource.data.arcId)
+        );
+      allow create: if signedIn() && ownsArc(request.resource.data.arcId);
+      allow update, delete: if ownsArc(resource.data.arcId);
+    }
+  }
+}
