@@ -46,6 +46,7 @@ const starterState = {
       storyId: demoStoryId,
       title: "Tide One",
       chapterIds: [demoChapterId],
+      soundtracks: [],
       phases: [
         {
           id: "phase-demo",
@@ -64,6 +65,7 @@ const starterState = {
       title: "Lanterns on the Pier",
       body: "# Opening scene\n\nA storm hangs over the harbor while the first lanterns come alive.",
       assets: [],
+      soundtracks: [],
       createdAt: new Date("2026-08-18T10:00:00Z").toISOString(),
       updatedAt: new Date("2026-08-18T10:00:00Z").toISOString(),
     },
@@ -119,6 +121,7 @@ function ensureArcPhasesData(arc) {
   return {
     ...arc,
     chapterIds: orderedChapterIds,
+    soundtracks: arc.soundtracks ?? [],
     phases: existingPhases,
   };
 }
@@ -322,6 +325,7 @@ function createLocalAdapter() {
         storyId,
         title,
         chapterIds: [],
+        soundtracks: [],
         phases: [buildDefaultPhase()],
         createdAt: now,
         updatedAt: now,
@@ -341,6 +345,7 @@ function createLocalAdapter() {
       arc.title = patch.title ?? arc.title;
       arc.phases = patch.phases ?? arc.phases;
       arc.chapterIds = patch.chapterIds ?? arc.chapterIds;
+      arc.soundtracks = patch.soundtracks ?? arc.soundtracks ?? [];
       arc.updatedAt = new Date().toISOString();
       state.stories[arc.storyId].updatedAt = arc.updatedAt;
       saveLocalState(state);
@@ -367,6 +372,7 @@ function createLocalAdapter() {
         title,
         body: "",
         assets: [],
+        soundtracks: [],
         createdAt: now,
         updatedAt: now,
       };
@@ -590,7 +596,12 @@ async function fetchStoryBundle(db, storyId) {
       return [
         arc.id,
         sortByIdOrder(
-          chapterSnapshots.docs.map((item) => ({ id: item.id, ...item.data(), assets: item.data().assets ?? [] })),
+          chapterSnapshots.docs.map((item) => ({
+            id: item.id,
+            ...item.data(),
+            assets: item.data().assets ?? [],
+            soundtracks: item.data().soundtracks ?? [],
+          })),
           arc.chapterIds ?? [],
         ),
       ];
@@ -736,13 +747,23 @@ function createFirebaseAdapter(authClient) {
           ...phase,
           chapters: sortByIdOrder(
             chapterSnapshots.docs
-              .map((item) => ({ id: item.id, ...item.data(), assets: item.data().assets ?? [] }))
+              .map((item) => ({
+                id: item.id,
+                ...item.data(),
+                assets: item.data().assets ?? [],
+                soundtracks: item.data().soundtracks ?? [],
+              }))
               .filter((chapter) => (phase.chapterIds ?? []).includes(chapter.id)),
             phase.chapterIds ?? [],
           ),
         })),
         chapters: sortByIdOrder(
-          chapterSnapshots.docs.map((item) => ({ id: item.id, ...item.data(), assets: item.data().assets ?? [] })),
+          chapterSnapshots.docs.map((item) => ({
+            id: item.id,
+            ...item.data(),
+            assets: item.data().assets ?? [],
+            soundtracks: item.data().soundtracks ?? [],
+          })),
           arc.chapterIds ?? [],
         ),
       };
@@ -750,7 +771,13 @@ function createFirebaseAdapter(authClient) {
     async getChapter(chapterId) {
       const chapterSnapshot = await getDoc(doc(db, "chapters", chapterId));
       const chapter = applyDocId(chapterSnapshot);
-      return chapter ? { ...chapter, assets: chapter.assets ?? [] } : null;
+      return chapter
+        ? {
+            ...chapter,
+            assets: chapter.assets ?? [],
+            soundtracks: chapter.soundtracks ?? [],
+          }
+        : null;
     },
     async createStory({ creatorId, creatorName, title, tags, visibility }) {
       const id = makeId("story");
@@ -793,6 +820,7 @@ function createFirebaseAdapter(authClient) {
         storyId,
         title,
         chapterIds: [],
+        soundtracks: [],
         phases: [buildDefaultPhase()],
         createdAt: now,
         updatedAt: now,
@@ -845,6 +873,7 @@ function createFirebaseAdapter(authClient) {
         title,
         body: "",
         assets: [],
+        soundtracks: [],
         createdAt: now,
         updatedAt: now,
       };

@@ -11,7 +11,37 @@ const state = {
   dragActive: false,
   saveStatus: "",
   authError: "",
+  soundtrack: {
+    arcId: "",
+    queue: [],
+    currentIndex: 0,
+    paused: true,
+    mode: "idle",
+    ready: false,
+    autoplayAttempted: false,
+    activeKey: "",
+    spotifyFinishedTrack: "",
+    youtubePlayer: null,
+    spotifyController: null,
+    syncToken: 0,
+  },
 };
+
+const SOUNDTRACK_STORAGE_KEY = "storyforge-soundtrack-state";
+
+function loadStoredSoundtrackState() {
+  try {
+    const raw = localStorage.getItem(SOUNDTRACK_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveStoredSoundtrackState() {
+  const { arcId, currentIndex, paused } = state.soundtrack;
+  localStorage.setItem(SOUNDTRACK_STORAGE_KEY, JSON.stringify({ arcId, currentIndex, paused }));
+}
 
 function getDisplayName(user = getUser()) {
   if (!user) {
@@ -34,6 +64,7 @@ function navigate(hash) {
   const nextHash = `#${hash}`;
   if (window.location.hash === nextHash) {
     render();
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     return;
   }
 
@@ -111,6 +142,447 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function makeClientId(prefix) {
+  return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function normalizeTrackLabel(value, fallback = "Soundtrack") {
+  return value?.trim() || fallback;
+}
+
+function extractYouTubeVideoId(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "youtu.be") {
+      return parsed.pathname.replace(/\//g, "") || null;
+    }
+
+    if (parsed.hostname.includes("youtube.com")) {
+      if (parsed.pathname === "/watch") {
+        return parsed.searchParams.get("v");
+      }
+
+      const parts = parsed.pathname.split("/").filter(Boolean);
+      if (["embed", "shorts", "live"].includes(parts[0])) {
+        return parts[1] ?? null;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function extractSpotifyInfo(url) {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.includes("spotify.com")) {
+      return null;
+    }
+
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts[0] !== "track" && parts[0] !== "album" && parts[0] !== "playlist" && parts[0] !== "episode") {
+      return null;
+    }
+
+    const entityId = parts[1]?.split("?")[0];
+    if (!entityId) {
+      return null;
+    }
+
+    return {
+      kind: parts[0],
+      uri: `spotify:${parts[0]}:${entityId}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseSoundtrackEntry(entry) {
+  const rawUrl = entry?.url?.trim();
+  const url = rawUrl && !/^https?:\/\//i.test(rawUrl) ? `https://${rawUrl}` : rawUrl;
+  if (!url) {
+    return null;
+  }
+
+  const youtubeId = extractYouTubeVideoId(url);
+  if (youtubeId) {
+    return {
+      id: entry.id ?? makeClientId("soundtrack"),
+      label: normalizeTrackLabel(entry.label, "YouTube track"),
+      url,
+      source: "youtube",
+      videoId: youtubeId,
+    };
+  }
+
+  const spotify = extractSpotifyInfo(url);
+  if (spotify) {
+    return {
+      id: entry.id ?? makeClientId("soundtrack"),
+      label: normalizeTrackLabel(entry.label, `Spotify ${spotify.kind}`),
+      url,
+      source: "spotify",
+      uri: spotify.uri,
+      spotifyKind: spotify.kind,
+    };
+  }
+
+  return null;
+}
+
+function buildSoundtrackQueue(soundtracks = []) {
+  return soundtracks.map(parseSoundtrackEntry).filter(Boolean);
+}
+
+function getSoundtrackLayer() {
+  let layer = document.querySelector("#soundtrack-layer");
+  if (layer) {
+    return layer;
+  }
+
+  layer = document.createElement("div");
+  layer.id = "soundtrack-layer";
+  layer.innerHTML = `
+    <div id="youtube-soundtrack-host"></div>
+    <div id="spotify-soundtrack-host"></div>
+  `;
+  document.body.append(layer);
+  return layer;
+}
+
+function loadExternalScript(src, readyCheck) {
+  if (readyCheck()) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const existing = [...document.querySelectorAll("script")].find((node) => node.src === src);
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error(`Failed to load ${src}`)), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.addEventListener("load", () => resolve(), { once: true });
+    script.addEventListener("error", () => reject(new Error(`Failed to load ${src}`)), { once: true });
+    document.head.append(script);
+  });
+}
+
+function getActiveSoundtrack() {
+  const queue = state.soundtrack.queue ?? [];
+  if (!queue.length) {
+    return null;
+  }
+
+  const index = Math.max(0, Math.min(state.soundtrack.currentIndex, queue.length - 1));
+  return queue[index] ?? null;
+}
+
+function updateQuickToolButton() {
+  const button = document.querySelector("[data-action='toggle-soundtrack']");
+  if (!button) {
+    return;
+  }
+
+  const active = getActiveSoundtrack();
+  button.disabled = !active;
+  button.classList.toggle("is-active", Boolean(active) && !state.soundtrack.paused);
+  button.setAttribute("aria-pressed", String(Boolean(active) && !state.soundtrack.paused));
+  button.setAttribute("title", active ? `${state.soundtrack.paused ? "Resume" : "Pause"} ${active.label}` : "No soundtrack available");
+}
+
+function persistSoundtrackUi() {
+  saveStoredSoundtrackState();
+  updateQuickToolButton();
+}
+
+function clearSoundtrackUi() {
+  const host = document.querySelector("#soundtrack-status");
+  if (host) {
+    host.textContent = "No soundtrack loaded.";
+  }
+  updateQuickToolButton();
+}
+
+function setSoundtrackStatus(message) {
+  const host = document.querySelector("#soundtrack-status");
+  if (host) {
+    host.textContent = message;
+  }
+}
+
+function pauseCurrentSoundtrack() {
+  const active = getActiveSoundtrack();
+  if (state.soundtrack.mode === "youtube" && state.soundtrack.youtubePlayer?.pauseVideo) {
+    state.soundtrack.youtubePlayer.pauseVideo();
+  }
+
+  if (state.soundtrack.mode === "spotify" && state.soundtrack.spotifyController?.pause) {
+    state.soundtrack.spotifyController.pause();
+  }
+
+  state.soundtrack.paused = true;
+  if (active) {
+    setSoundtrackStatus(`Paused: ${active.label}`);
+  }
+  persistSoundtrackUi();
+}
+
+function playCurrentSoundtrack() {
+  const active = getActiveSoundtrack();
+  if (!active) {
+    return;
+  }
+
+  if (state.soundtrack.mode === "youtube" && state.soundtrack.youtubePlayer?.playVideo) {
+    state.soundtrack.youtubePlayer.playVideo();
+  }
+
+  if (state.soundtrack.mode === "spotify" && state.soundtrack.spotifyController?.play) {
+    state.soundtrack.spotifyController.play();
+  }
+
+  state.soundtrack.paused = false;
+  setSoundtrackStatus(`Now playing: ${active.label}`);
+  persistSoundtrackUi();
+}
+
+function advanceSoundtrack() {
+  if (!state.soundtrack.queue.length) {
+    return;
+  }
+
+  state.soundtrack.currentIndex = (state.soundtrack.currentIndex + 1) % state.soundtrack.queue.length;
+  state.soundtrack.spotifyFinishedTrack = "";
+  state.soundtrack.activeKey = "";
+  state.soundtrack.ready = false;
+  state.soundtrack.autoplayAttempted = false;
+  persistSoundtrackUi();
+  syncSoundtrackPlayback();
+}
+
+async function ensureYouTubePlayer(track, token) {
+  await loadExternalScript("https://www.youtube.com/iframe_api", () => Boolean(window.YT?.Player));
+
+  if (token !== state.soundtrack.syncToken) {
+    return;
+  }
+
+  getSoundtrackLayer();
+
+  if (!state.soundtrack.youtubePlayer) {
+    await new Promise((resolve) => {
+      const start = () => {
+        state.soundtrack.youtubePlayer = new window.YT.Player("youtube-soundtrack-host", {
+          height: "200",
+          width: "320",
+          videoId: track.videoId,
+          playerVars: {
+            autoplay: 1,
+            controls: 1,
+            rel: 0,
+          },
+          events: {
+            onReady: () => resolve(),
+            onStateChange: (event) => {
+              if (event.data === window.YT.PlayerState.ENDED) {
+                advanceSoundtrack();
+                return;
+              }
+
+              if (event.data === window.YT.PlayerState.PLAYING) {
+                state.soundtrack.paused = false;
+                persistSoundtrackUi();
+              }
+
+              if (event.data === window.YT.PlayerState.PAUSED) {
+                state.soundtrack.paused = true;
+                persistSoundtrackUi();
+              }
+            },
+          },
+        });
+      };
+
+      if (window.YT?.Player) {
+        start();
+      } else {
+        const previous = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = () => {
+          previous?.();
+          start();
+        };
+      }
+    });
+  } else {
+    state.soundtrack.youtubePlayer.loadVideoById(track.videoId);
+  }
+
+  if (token !== state.soundtrack.syncToken) {
+    return;
+  }
+
+  state.soundtrack.mode = "youtube";
+  state.soundtrack.ready = true;
+  state.soundtrack.activeKey = track.id;
+  setSoundtrackStatus(`Now playing: ${track.label}`);
+  if (!state.soundtrack.paused) {
+    state.soundtrack.youtubePlayer.playVideo();
+  }
+  updateQuickToolButton();
+}
+
+async function ensureSpotifyPlayer(track, token) {
+  await loadExternalScript("https://open.spotify.com/embed/iframe-api/v1", () => Boolean(window.SpotifyIframeApi || window.onSpotifyIframeApiReady));
+
+  if (token !== state.soundtrack.syncToken) {
+    return;
+  }
+
+  getSoundtrackLayer();
+
+  if (!state.soundtrack.spotifyController) {
+    await new Promise((resolve) => {
+      const boot = (IFrameAPI) => {
+        IFrameAPI.createController(
+          document.querySelector("#spotify-soundtrack-host"),
+          {
+            uri: track.uri,
+            width: 320,
+            height: 160,
+          },
+          (EmbedController) => {
+            state.soundtrack.spotifyController = EmbedController;
+            EmbedController.addListener("ready", () => resolve());
+            EmbedController.addListener("playback_started", () => {
+              state.soundtrack.paused = false;
+              persistSoundtrackUi();
+            });
+            EmbedController.addListener("playback_update", (event) => {
+              const data = event.data ?? {};
+              state.soundtrack.paused = Boolean(data.isPaused);
+              persistSoundtrackUi();
+              if (
+                !data.isPaused &&
+                data.duration > 0 &&
+                data.position >= data.duration - 1000 &&
+                state.soundtrack.spotifyFinishedTrack !== track.id
+              ) {
+                state.soundtrack.spotifyFinishedTrack = track.id;
+                advanceSoundtrack();
+              }
+            });
+          },
+        );
+      };
+
+      if (window.SpotifyIframeApi?.createController) {
+        boot(window.SpotifyIframeApi);
+      } else {
+        window.onSpotifyIframeApiReady = (IFrameAPI) => {
+          window.SpotifyIframeApi = IFrameAPI;
+          boot(IFrameAPI);
+        };
+      }
+    });
+  } else if (state.soundtrack.spotifyController.loadUri) {
+    state.soundtrack.spotifyController.loadUri(track.uri);
+  }
+
+  if (token !== state.soundtrack.syncToken) {
+    return;
+  }
+
+  state.soundtrack.mode = "spotify";
+  state.soundtrack.ready = true;
+  state.soundtrack.activeKey = track.id;
+  state.soundtrack.spotifyFinishedTrack = "";
+  setSoundtrackStatus(`Now playing: ${track.label}`);
+  if (!state.soundtrack.paused && state.soundtrack.spotifyController?.play) {
+    state.soundtrack.spotifyController.play();
+  }
+  updateQuickToolButton();
+}
+
+async function syncSoundtrackPlayback() {
+  const token = ++state.soundtrack.syncToken;
+  const track = getActiveSoundtrack();
+
+  if (!track) {
+    state.soundtrack.arcId = "";
+    state.soundtrack.queue = [];
+    state.soundtrack.mode = "idle";
+    state.soundtrack.ready = false;
+    state.soundtrack.activeKey = "";
+    pauseCurrentSoundtrack();
+    clearSoundtrackUi();
+    return;
+  }
+
+  try {
+    if (track.source === "youtube") {
+      await ensureYouTubePlayer(track, token);
+      return;
+    }
+
+    if (track.source === "spotify") {
+      await ensureSpotifyPlayer(track, token);
+      return;
+    }
+  } catch (error) {
+    state.saveStatus = `Soundtrack error: ${String(error.message || error)}`;
+    setSoundtrackStatus("Soundtrack could not be loaded.");
+    updateQuickToolButton();
+  }
+}
+
+function activateSoundtrackQueue(arcId, queue) {
+  const stored = loadStoredSoundtrackState();
+  const queueChanged = arcId !== state.soundtrack.arcId || JSON.stringify(queue.map((entry) => entry.id)) !== JSON.stringify((state.soundtrack.queue ?? []).map((entry) => entry.id));
+
+  state.soundtrack.arcId = arcId;
+  state.soundtrack.queue = queue;
+
+  if (queueChanged) {
+    state.soundtrack.currentIndex =
+      stored.arcId === arcId && typeof stored.currentIndex === "number"
+        ? Math.max(0, Math.min(stored.currentIndex, queue.length - 1))
+        : 0;
+    state.soundtrack.paused = stored.arcId === arcId ? Boolean(stored.paused) : false;
+    state.soundtrack.ready = false;
+    state.soundtrack.activeKey = "";
+    state.soundtrack.spotifyFinishedTrack = "";
+  }
+
+  persistSoundtrackUi();
+  syncSoundtrackPlayback();
+}
+
+function deactivateSoundtrackQueue() {
+  state.soundtrack.arcId = "";
+  state.soundtrack.queue = [];
+  state.soundtrack.currentIndex = 0;
+  state.soundtrack.paused = true;
+  state.soundtrack.activeKey = "";
+  state.soundtrack.ready = false;
+  state.soundtrack.spotifyFinishedTrack = "";
+  if (state.soundtrack.youtubePlayer?.pauseVideo) {
+    state.soundtrack.youtubePlayer.pauseVideo();
+  }
+  if (state.soundtrack.spotifyController?.pause) {
+    state.soundtrack.spotifyController.pause();
+  }
+  clearSoundtrackUi();
+  saveStoredSoundtrackState();
+}
+
 function renderMarkdown(markdown) {
   const escaped = escapeHtml(markdown);
   const fenced = escaped.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
@@ -165,7 +637,20 @@ function uniqueTags(stories) {
   return [...new Set(stories.flatMap((story) => story.tags))].sort((a, b) => a.localeCompare(b));
 }
 
-function layout(content, activeTab) {
+function renderQuickTools(content = "") {
+  return `
+    <aside class="quick-tools">
+      <div class="quick-tools-frame">
+        <div class="quick-tools-label">Quick Tools</div>
+        <div class="quick-tools-body">
+          ${content || '<div class="quick-tools-empty">No tools</div>'}
+        </div>
+      </div>
+    </aside>
+  `;
+}
+
+function layout(content, activeTab, quickToolsContent = "") {
   const user = getUser();
   const authNotice = state.authError
     ? `<div class="notice"><strong>Sign-in error</strong><div class="muted">${escapeHtml(state.authError)}</div></div>`
@@ -199,6 +684,7 @@ function layout(content, activeTab) {
         </div>
       </aside>
       <main class="content">${content}</main>
+      ${renderQuickTools(quickToolsContent)}
     </div>
   `;
 
@@ -534,6 +1020,63 @@ function renderPhaseHeader(phase, owner, browserView = false, arcId = "") {
   `;
 }
 
+function renderSoundtrackPanel(chapter) {
+  const soundtracks = chapter.soundtracks ?? [];
+  return `
+    <section class="panel stack">
+      <div class="section-header">
+        <div>
+          <h3>Soundtracks</h3>
+          <p class="muted">Add YouTube or Spotify links that should play only for this chapter.</p>
+        </div>
+        <span class="pill">${soundtracks.length} track(s)</span>
+      </div>
+      <div class="inline-form soundtrack-form">
+        <input id="soundtrack-label-input" placeholder="Optional label, for example Tavern Theme" />
+        <input id="soundtrack-url-input" placeholder="https://youtube.com/... or https://open.spotify.com/..." />
+        <button class="ghost-button" data-action="add-soundtrack" data-chapter-id="${chapter.id}">Add soundtrack</button>
+      </div>
+      <div class="soundtrack-list">
+        ${
+          soundtracks.length
+            ? soundtracks.map((track) => `
+                <article class="soundtrack-item">
+                  <div>
+                    <strong>${escapeHtml(track.label?.trim() || "Untitled soundtrack")}</strong>
+                    <div class="muted mono">${escapeHtml(track.url ?? "")}</div>
+                  </div>
+                  <button class="danger-button" data-action="delete-soundtrack" data-chapter-id="${chapter.id}" data-soundtrack-id="${track.id}">Remove</button>
+                </article>
+              `).join("")
+            : '<div class="empty-state">No soundtrack links yet.</div>'
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderChapterQuickTools(soundtrackQueue) {
+  if (!soundtrackQueue.length) {
+    return "";
+  }
+
+  const active = getActiveSoundtrack();
+  return `
+    <div class="quick-tool-stack">
+      <button
+        class="quick-tool-button ${active && !state.soundtrack.paused ? "is-active" : ""}"
+        data-action="toggle-soundtrack"
+        aria-pressed="${String(Boolean(active) && !state.soundtrack.paused)}"
+        title="${escapeHtml(active ? `${state.soundtrack.paused ? "Resume" : "Pause"} ${active.label}` : "No soundtrack available")}"
+      >
+        <span class="quick-tool-icon">♪</span>
+      </button>
+      <div class="quick-tool-caption">Music</div>
+      <div id="soundtrack-status" class="quick-tool-status">${escapeHtml(active ? `${state.soundtrack.paused ? "Paused" : "Now playing"}: ${active.label}` : "No soundtrack loaded.")}</div>
+    </div>
+  `;
+}
+
 async function renderArcPage(storyId, arcId) {
   const [story, arc] = await Promise.all([state.adapter.getStory(storyId), state.adapter.getArc(arcId)]);
   if (!story || !arc) {
@@ -656,10 +1199,12 @@ async function renderChapterPage(storyId, arcId, chapterId) {
     return renderMissing("This story is private.");
   }
   const assets = chapter.assets ?? [];
+  const soundtrackQueue = browserView ? buildSoundtrackQueue(chapter.soundtracks ?? []) : [];
   const chapterIndex = (arc.chapters ?? []).findIndex((entry) => entry.id === chapterId);
   const previousChapter = chapterIndex > 0 ? arc.chapters[chapterIndex - 1] : null;
   const nextChapter = chapterIndex >= 0 && chapterIndex < arc.chapters.length - 1 ? arc.chapters[chapterIndex + 1] : null;
-  const chapterPager = renderChapterPager(story.id, arc.id, previousChapter, nextChapter, browserView);
+  const chapterPagerTop = renderChapterPager(story.id, arc.id, previousChapter, nextChapter, browserView);
+  const chapterPagerBottom = renderChapterPager(story.id, arc.id, previousChapter, nextChapter, browserView);
   const editorContent = owner && !browserView
     ? `
         <div class="editor-shell">
@@ -667,6 +1212,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
             <div class="editor-controls">
               <input id="chapter-title-input" value="${escapeHtml(chapter.title)}" ${owner ? "" : "disabled"} />
               <textarea id="chapter-body-input" class="markdown-area" ${owner ? "" : "disabled"}>${escapeHtml(chapter.body)}</textarea>
+              ${chapterPagerBottom}
               ${owner ? `
                 <div class="panel asset-helper">
                   <div class="section-header">
@@ -686,6 +1232,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
               <div class="asset-list">
                 ${assets.length ? assets.map(renderAssetItem).join("") : '<div class="empty-state">No assets in this chapter yet.</div>'}
               </div>
+              ${renderSoundtrackPanel(chapter)}
               <div class="notice mono">${escapeHtml(state.saveStatus || "Tip: use `![alt](image-url)` to place pasted external images into the chapter body.")}</div>
             </div>
           </section>
@@ -703,6 +1250,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
           </div>
           <div class="markdown-preview">${renderMarkdown(chapter.body || "*This chapter is empty.*")}</div>
         </section>
+        ${chapterPagerBottom}
         ${assets.length ? `<section class="panel stack"><h3>Referenced images</h3><div class="asset-list">${assets.map(renderAssetItem).join("")}</div></section>` : ""}
       `;
 
@@ -725,13 +1273,19 @@ async function renderChapterPage(storyId, arcId, chapterId) {
             ${owner && !browserView ? `<button class="primary-button" data-action="save-chapter" data-chapter-id="${chapter.id}">Save</button>` : ""}
           </div>
         </div>
-        ${chapterPager}
+        ${chapterPagerTop}
         ${editorContent}
-        ${chapterPager}
       </div>
     `,
     browserView ? "browser" : owner ? "creator" : "browser",
+    renderChapterQuickTools(soundtrackQueue),
   );
+
+  if (browserView && soundtrackQueue.length) {
+    activateSoundtrackQueue(arc.id, soundtrackQueue);
+  } else {
+    deactivateSoundtrackQueue();
+  }
 }
 
 function renderAssetItem(asset) {
@@ -771,20 +1325,27 @@ async function render() {
 
   switch (state.route.name) {
     case "home":
+      deactivateSoundtrackQueue();
       return renderHome();
     case "creator":
+      deactivateSoundtrackQueue();
       return renderCreator();
     case "browser":
+      deactivateSoundtrackQueue();
       return renderBrowser();
     case "settings":
+      deactivateSoundtrackQueue();
       return renderSettings();
     case "story":
+      deactivateSoundtrackQueue();
       return renderStoryPage(state.route.params.storyId);
     case "arc":
+      deactivateSoundtrackQueue();
       return renderArcPage(state.route.params.storyId, state.route.params.arcId);
     case "chapter":
       return renderChapterPage(state.route.params.storyId, state.route.params.arcId, state.route.params.chapterId);
     default:
+      deactivateSoundtrackQueue();
       return renderMissing("This page does not exist.");
   }
 }
@@ -1117,6 +1678,31 @@ document.addEventListener("click", async (event) => {
     return render();
   }
 
+  if (action === "add-soundtrack") {
+    const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+    const label = document.querySelector("#soundtrack-label-input")?.value.trim() ?? "";
+    const url = document.querySelector("#soundtrack-url-input")?.value.trim() ?? "";
+    const parsed = parseSoundtrackEntry({ id: makeClientId("soundtrack"), label, url });
+    if (!parsed) {
+      state.saveStatus = "Please enter a valid YouTube or Spotify link.";
+      return render();
+    }
+    await state.adapter.updateChapter(chapter.id, {
+      soundtracks: [...(chapter.soundtracks ?? []), { id: parsed.id, label: parsed.label, url: parsed.url }],
+    });
+    state.saveStatus = "Soundtrack added.";
+    return render();
+  }
+
+  if (action === "delete-soundtrack") {
+    const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+    await state.adapter.updateChapter(chapter.id, {
+      soundtracks: (chapter.soundtracks ?? []).filter((track) => track.id !== actionTarget.dataset.soundtrackId),
+    });
+    state.saveStatus = "Soundtrack removed.";
+    return render();
+  }
+
   if (action === "move-arc-up" || action === "move-arc-down") {
     const story = await state.adapter.getStory(actionTarget.dataset.storyId);
     const index = Number(actionTarget.dataset.index);
@@ -1225,6 +1811,19 @@ document.addEventListener("click", async (event) => {
       return render();
     }
   }
+
+  if (action === "toggle-soundtrack") {
+    if (!getActiveSoundtrack()) {
+      return;
+    }
+
+    if (state.soundtrack.paused) {
+      playCurrentSoundtrack();
+    } else {
+      pauseCurrentSoundtrack();
+    }
+    return;
+  }
 });
 
 document.addEventListener("change", async (event) => {
@@ -1301,6 +1900,7 @@ document.addEventListener("drop", async (event) => {
 
 window.addEventListener("hashchange", () => {
   state.saveStatus = "";
+  window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   render();
 });
 

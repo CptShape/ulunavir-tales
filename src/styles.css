@@ -72,7 +72,7 @@ a {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: 300px minmax(0, 1fr) 72px;
   min-height: 100vh;
 }
 
@@ -218,6 +218,95 @@ a {
 .content {
   padding: 30px;
   min-height: 100vh;
+}
+
+.quick-tools {
+  border-left: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(28, 20, 15, 0.98), rgba(18, 13, 10, 0.99)),
+    var(--bg-panel-strong);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  box-shadow: inset 1px 0 0 rgba(255, 240, 213, 0.04);
+}
+
+.quick-tools-frame {
+  position: relative;
+  height: 100%;
+  padding: 18px 10px;
+}
+
+.quick-tools-label {
+  display: block;
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.quick-tools-body {
+  position: absolute;
+  inset: 50% 8px auto;
+  transform: translateY(-50%);
+  display: grid;
+  justify-items: center;
+  width: calc(100% - 16px);
+}
+
+.quick-tools-empty {
+  color: rgba(201, 181, 150, 0.4);
+  font-size: 0.72rem;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.quick-tool-stack {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  width: 100%;
+}
+
+.quick-tool-button {
+  width: 48px;
+  height: 48px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  color: var(--parchment);
+  background: linear-gradient(180deg, rgba(76, 56, 39, 0.9), rgba(36, 25, 18, 0.96));
+  box-shadow: var(--glow);
+}
+
+.quick-tool-button.is-active {
+  background: linear-gradient(180deg, #d4ac67, #9b6b2c);
+  color: #24160d;
+}
+
+.quick-tool-icon {
+  display: inline-block;
+  font-size: 1.3rem;
+  line-height: 1;
+}
+
+.quick-tool-caption,
+.quick-tool-status {
+  text-align: center;
+  word-break: break-word;
+}
+
+.quick-tool-caption {
+  color: var(--parchment-dim);
+  font-size: 0.78rem;
+}
+
+.quick-tool-status {
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  line-height: 1.45;
 }
 
 .panel,
@@ -503,6 +592,23 @@ textarea::placeholder {
   max-width: 260px;
 }
 
+.soundtrack-list {
+  display: grid;
+  gap: 12px;
+}
+
+.soundtrack-item {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: rgba(62, 44, 31, 0.58);
+}
+
 .small-button {
   min-width: 38px;
   min-height: 38px;
@@ -645,6 +751,17 @@ textarea::placeholder {
   background: rgba(76, 56, 39, 0.32);
 }
 
+#soundtrack-layer {
+  position: fixed;
+  right: -9999px;
+  bottom: -9999px;
+  width: 320px;
+  height: 200px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.01;
+}
+
 @media (max-width: 1040px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -658,6 +775,31 @@ textarea::placeholder {
     position: relative;
     top: auto;
     overflow: visible;
+  }
+
+  .quick-tools {
+    height: auto;
+    position: relative;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    min-height: 90px;
+  }
+
+  .quick-tools-frame {
+    padding: 12px;
+  }
+
+  .quick-tools-body {
+    position: static;
+    inset: auto;
+    transform: none;
+    width: 100%;
+    margin-top: 10px;
+  }
+
+  .quick-tools-empty {
+    writing-mode: initial;
+    transform: none;
   }
 
   .editor-shell,
