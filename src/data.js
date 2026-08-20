@@ -22,6 +22,18 @@ function normalizeEmail(value) {
   return String(value ?? "").trim().toLowerCase();
 }
 
+function matchesPendingTransferEmail(story, email) {
+  const normalized = normalizeEmail(email);
+  if (!normalized || story?.pendingTransferStatus !== "pending") {
+    return false;
+  }
+
+  return [
+    story.pendingTransferEmailLower,
+    normalizeEmail(story.pendingTransfer?.targetEmail),
+  ].includes(normalized);
+}
+
 const starterState = {
   users: {
     "demo-user": {
@@ -382,10 +394,11 @@ function createLocalAdapter() {
         throw new Error("Story not found.");
       }
 
-      const userEmailLower = normalizeEmail(user?.email);
-      if (!userEmailLower || story.pendingTransferStatus !== "pending" || story.pendingTransferEmailLower !== userEmailLower) {
+      if (!matchesPendingTransferEmail(story, user?.email)) {
         throw new Error("This transfer request is no longer available.");
       }
+
+      const userEmailLower = normalizeEmail(user?.email);
 
       const profile = state.users[user.id] ?? {
         id: user.id,
@@ -412,7 +425,7 @@ function createLocalAdapter() {
         throw new Error("Story not found.");
       }
 
-      if (story.pendingTransferStatus !== "pending" || story.pendingTransferEmailLower !== normalizeEmail(email)) {
+      if (!matchesPendingTransferEmail(story, email)) {
         throw new Error("This transfer request is no longer available.");
       }
 
@@ -1025,13 +1038,14 @@ function createFirebaseAdapter(authClient) {
     },
     async acceptStoryTransfer(storyId, user) {
       const story = await fetchStoryBundle(db, storyId);
-      const userEmailLower = normalizeEmail(user?.email);
       if (!story) {
         throw new Error("Story not found.");
       }
-      if (!userEmailLower || story.pendingTransferStatus !== "pending" || story.pendingTransferEmailLower !== userEmailLower) {
+      if (!matchesPendingTransferEmail(story, user?.email)) {
         throw new Error("This transfer request is no longer available.");
       }
+
+      const userEmailLower = normalizeEmail(user?.email);
 
       await touchUserProfile(db, user);
       const profileSnapshot = await getDoc(doc(db, "users", user.id));
@@ -1053,7 +1067,7 @@ function createFirebaseAdapter(authClient) {
       if (!story) {
         throw new Error("Story not found.");
       }
-      if (story.pendingTransferStatus !== "pending" || story.pendingTransferEmailLower !== normalizeEmail(email)) {
+      if (!matchesPendingTransferEmail(story, email)) {
         throw new Error("This transfer request is no longer available.");
       }
 
