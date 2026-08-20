@@ -11,6 +11,7 @@ const state = {
   dragActive: false,
   saveStatus: "",
   authError: "",
+  loadError: "",
   soundtrack: {
     arcId: "",
     queue: [],
@@ -60,10 +61,14 @@ function persistSession(user) {
   localStorage.setItem("storyforge-session", JSON.stringify(user));
 }
 
+function clearLingeringModals() {
+  document.querySelectorAll(".modal-backdrop").forEach((node) => node.remove());
+}
+
 function navigate(hash) {
   const nextHash = `#${hash}`;
   if (window.location.hash === nextHash) {
-    render();
+    safeRender();
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     return;
   }
@@ -571,6 +576,12 @@ function layout(content, activeTab, quickToolsContent = "") {
   const authNotice = state.authError
     ? `<div class="notice"><strong>Sign-in error</strong><div class="muted">${escapeHtml(state.authError)}</div></div>`
     : "";
+  const loadNotice = state.loadError
+    ? `<div class="notice"><strong>Load error</strong><div class="muted">${escapeHtml(state.loadError)}</div></div>`
+    : "";
+  const statusNotice = state.saveStatus
+    ? `<div class="notice"><strong>Status</strong><div class="muted">${escapeHtml(state.saveStatus)}</div></div>`
+    : "";
 
   appRoot.innerHTML = `
     <div class="app-shell">
@@ -604,9 +615,9 @@ function layout(content, activeTab, quickToolsContent = "") {
     </div>
   `;
 
-  if (authNotice) {
+  if (authNotice || loadNotice || statusNotice) {
     const contentRoot = appRoot.querySelector(".content");
-    contentRoot.insertAdjacentHTML("afterbegin", authNotice);
+    contentRoot.insertAdjacentHTML("afterbegin", `${statusNotice}${loadNotice}${authNotice}`);
   }
 }
 
@@ -665,11 +676,57 @@ function heroCard() {
   `;
 }
 
+function renderIncomingTransferPanel(transfers) {
+  if (!transfers.length) {
+    return "";
+  }
+
+  return `
+    <section class="panel stack">
+      <div class="section-header">
+        <div>
+          <h3>Ownership Requests</h3>
+          <p class="muted">Stories shared with you stay with the current owner until you accept.</p>
+        </div>
+        <span class="pill">${transfers.length} pending</span>
+      </div>
+      <div class="story-list">
+        ${transfers.map((story) => `
+          <article class="list-card">
+            <div class="stack">
+              <div>
+                <h3>${escapeHtml(story.title)}</h3>
+                <p class="muted">Requested by ${escapeHtml(story.pendingTransfer?.requestedByName ?? story.creatorName)} on ${escapeHtml(formatDate(story.pendingTransfer?.requestedAt ?? story.updatedAt))}</p>
+              </div>
+              <div class="card-actions">
+                <button class="primary-button" data-action="accept-story-transfer" data-story-id="${story.id}">Accept</button>
+                <button class="ghost-button" data-action="decline-story-transfer" data-story-id="${story.id}">Decline</button>
+                <a class="ghost-button" href="#/stories/${story.id}?view=browser">Preview</a>
+              </div>
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
 async function renderHome() {
+  const user = getUser();
+  let transfers = [];
+  if (user?.email) {
+    try {
+      transfers = await state.adapter.listIncomingStoryTransfers?.(user.email) ?? [];
+    } catch (error) {
+      console.error("Incoming transfer list failed:", error);
+      state.loadError = "Ownership requests could not be loaded right now.";
+    }
+  }
   layout(
     `
       <div class="stack">
         ${heroCard()}
+        ${renderIncomingTransferPanel(transfers)}
         <section class="grid cols-2">
           <article class="panel">
             <h3>Main Menu</h3>
@@ -695,6 +752,15 @@ async function renderHome() {
 async function renderCreator() {
   const user = getUser();
   const stories = await state.adapter.listCreatorStories(user?.id);
+  let transfers = [];
+  if (user?.email) {
+    try {
+      transfers = await state.adapter.listIncomingStoryTransfers?.(user.email) ?? [];
+    } catch (error) {
+      console.error("Incoming transfer list failed:", error);
+      state.loadError = "Ownership requests could not be loaded right now.";
+    }
+  }
   const query = getRouteQuery();
   const search = query.get("q") ?? "";
   const tag = query.get("tag") ?? "";
@@ -717,6 +783,7 @@ async function renderCreator() {
           </div>
           <button class="primary-button" data-action="create-story" ${user ? "" : "disabled"}>Create</button>
         </div>
+        ${renderIncomingTransferPanel(transfers)}
         ${loginNotice}
         <section class="panel stack">
           <div class="search-row">
@@ -852,6 +919,8 @@ async function renderStoryPage(storyId) {
   const owner = isOwner(story);
   const browserView = getRouteQuery().get("view") === "browser";
   const structureView = getStructureView();
+  const transferPanelOpen = getRouteQuery().get("transfer") === "1";
+  const pendingTransfer = story.pendingTransferStatus === "pending" ? story.pendingTransfer : null;
   if (story.visibility === "private" && !owner) {
     return renderMissing("This story is private.");
   }
@@ -874,6 +943,7 @@ async function renderStoryPage(storyId) {
               <button class="ghost-button ${structureView === "list" ? "is-active" : ""}" data-action="set-structure-view" data-view="list">List</button>
             </div>
             ${browserView && owner ? '<a class="ghost-button" href="#/stories/' + story.id + '">Edit</a>' : ""}
+            ${owner && !browserView ? '<button class="ghost-button" type="button" data-action="open-story-transfer" data-story-id="' + story.id + '">Transfer Ownership</button>' : ""}
             ${owner && !browserView ? '<button class="primary-button" data-action="create-arc" data-story-id="' + story.id + '">New arc</button>' : ""}
           </div>
         </div>
@@ -890,6 +960,32 @@ async function renderStoryPage(storyId) {
             <strong>${escapeHtml(story.creatorName)}</strong>
             <div class="muted">Created ${formatDate(story.createdAt)}. Visibility is currently ${escapeHtml(story.visibility)}.</div>
           </div>
+          ${owner && pendingTransfer ? `
+            <div class="notice">
+              <strong>Transfer pending</strong>
+              <div class="muted">Waiting for ${escapeHtml(pendingTransfer.targetEmail ?? "")} to accept. Ownership stays with you until they do.</div>
+              <div class="card-actions">
+                <button class="ghost-button" data-action="cancel-story-transfer" data-story-id="${story.id}">Cancel transfer</button>
+              </div>
+            </div>
+          ` : ""}
+          ${owner && !browserView && transferPanelOpen ? `
+            <div class="notice stack">
+              <div>
+                <strong>Transfer ownership</strong>
+                <div class="muted">Enter the recipient Gmail and type TRANSFER. The story stays with you until they accept.</div>
+              </div>
+              <div class="inline-form">
+                <input id="story-transfer-email-input" placeholder="friend@gmail.com" />
+                <input id="story-transfer-confirm-input" placeholder="Type TRANSFER" />
+              </div>
+              <div class="card-actions">
+                <button class="primary-button" data-action="submit-story-transfer" data-story-id="${story.id}">Send request</button>
+                <button class="ghost-button" data-action="close-story-transfer" data-story-id="${story.id}">Close</button>
+              </div>
+              <div class="muted">Wrong email does not remove the story from you. It only creates a pending request that you can cancel.</div>
+            </div>
+          ` : ""}
         </section>
         <section class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
           ${story.arcs.length ? story.arcs.map((arc, index) => renderArcCard(arc, story, owner, index, browserView)).join("") : '<div class="empty-state">No arcs yet. Create the first arc to start structuring this story.</div>'}
@@ -1077,6 +1173,17 @@ async function renderArcPage(storyId, arcId) {
     `,
     browserView ? "browser" : owner ? "creator" : "browser",
   );
+
+  if (owner && !browserView) {
+    const transferButton = document.querySelector("#story-transfer-button");
+    if (transferButton) {
+      transferButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        showStoryTransferModal(story.id);
+      });
+    }
+  }
 }
 
 function renderChapterCard(chapter, story, arc, owner, index, browserView = false, phase = null) {
@@ -1102,6 +1209,7 @@ function renderChapterCard(chapter, story, arc, owner, index, browserView = fals
       }
       <div class="card-actions">
         <a class="primary-button" href="#/stories/${story.id}/arcs/${arc.id}/chapters/${chapter.id}${browserView ? "?view=browser" : ""}">Open chapter</a>
+        ${owner && !browserView ? `<button class="small-button" title="Move chapter" data-action="open-transfer-chapter" data-story-id="${story.id}" data-arc-id="${arc.id}" data-phase-id="${phase?.id ?? ""}" data-chapter-id="${chapter.id}">↗</button>` : ""}
         ${owner && !browserView ? `<button class="danger-button" data-action="delete-chapter" data-story-id="${story.id}" data-arc-id="${arc.id}" data-chapter-id="${chapter.id}">Delete</button>` : ""}
       </div>
     </article>
@@ -1164,7 +1272,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
                     <button class="ghost-button" data-action="add-external-asset" data-chapter-id="${chapter.id}">Add image</button>
                   </div>
                   <div class="notice">
-                    Upload the image to Imgur first, then paste the direct image URL here. This will save the link on the chapter and append the markdown automatically.
+                    Upload the image to Imgur first, then paste the direct image URL here. This saves the asset for the chapter without changing your markdown body.
                   </div>
                 </div>
               ` : ""}
@@ -1260,6 +1368,8 @@ function breadcrumbs(items) {
 }
 
 async function render() {
+  clearLingeringModals();
+  state.loadError = "";
   state.route = parseRoute();
 
   switch (state.route.name) {
@@ -1289,6 +1399,27 @@ async function render() {
   }
 }
 
+async function safeRender() {
+  try {
+    await render();
+  } catch (error) {
+    console.error("Render failed:", error);
+    state.loadError = String(error?.message || error || "The page could not be rendered.");
+    appRoot.innerHTML = `
+      <main class="content">
+        <section class="panel stack">
+          <h2>Page failed to load</h2>
+          <p class="muted">${escapeHtml(state.loadError)}</p>
+          <div class="card-actions">
+            <a class="ghost-button" href="#/">Main Menu</a>
+            <a class="ghost-button" href="#/creator">Creator</a>
+          </div>
+        </section>
+      </main>
+    `;
+  }
+}
+
 function readStoryFormValues() {
   return {
     title: document.querySelector("#story-title-input")?.value.trim() ?? "",
@@ -1307,6 +1438,117 @@ function swap(array, from, to) {
   return next;
 }
 
+async function showTransferChapterModal({ chapterId, currentStoryId, currentArcId, currentPhaseId }) {
+  const user = getUser();
+  if (!user?.id) {
+    state.saveStatus = "Sign in first to move chapters between your stories.";
+    return render();
+  }
+
+  const stories = await state.adapter.listCreatorStories(user.id);
+  if (!stories.length) {
+    state.saveStatus = "You need at least one story before moving chapters.";
+    return render();
+  }
+
+  const detailedStories = await Promise.all(stories.map((story) => state.adapter.getStory(story.id)));
+  const availableStories = detailedStories.filter(Boolean).filter((story) => (story.arcs ?? []).length > 0);
+  if (!availableStories.length) {
+    state.saveStatus = "Create an arc first, then you can move chapters into it.";
+    return render();
+  }
+
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal-card stack transfer-modal">
+      <div>
+        <h3>Move chapter</h3>
+        <p class="muted">Choose one of your stories, then pick the destination arc and phase.</p>
+      </div>
+      <select id="transfer-story-select"></select>
+      <select id="transfer-arc-select"></select>
+      <select id="transfer-phase-select"></select>
+      <div class="notice" id="transfer-summary"></div>
+      <div class="card-actions">
+        <button class="primary-button" id="transfer-confirm">Move chapter</button>
+        <button class="ghost-button" id="transfer-cancel">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.body.append(modal);
+
+  const storySelect = modal.querySelector("#transfer-story-select");
+  const arcSelect = modal.querySelector("#transfer-arc-select");
+  const phaseSelect = modal.querySelector("#transfer-phase-select");
+  const summary = modal.querySelector("#transfer-summary");
+  const confirmButton = modal.querySelector("#transfer-confirm");
+  const close = () => modal.remove();
+
+  function selectedStory() {
+    return availableStories.find((story) => story.id === storySelect.value) ?? availableStories[0];
+  }
+
+  function selectedArc() {
+    return selectedStory()?.arcs.find((arc) => arc.id === arcSelect.value) ?? selectedStory()?.arcs?.[0] ?? null;
+  }
+
+  function selectedPhase() {
+    return selectedArc()?.phases.find((phase) => phase.id === phaseSelect.value) ?? selectedArc()?.phases?.[0] ?? null;
+  }
+
+  function renderSummary() {
+    const story = selectedStory();
+    const arc = selectedArc();
+    const phase = selectedPhase();
+    const sameSpot = story?.id === currentStoryId && arc?.id === currentArcId && phase?.id === currentPhaseId;
+    summary.innerHTML = sameSpot
+      ? "This chapter is already in that exact phase."
+      : `Destination: <strong>${escapeHtml(story?.title ?? "-")}</strong> / <strong>${escapeHtml(arc?.title ?? "-")}</strong> / <strong>${escapeHtml(phase?.title ?? "-")}</strong>`;
+    confirmButton.disabled = !story || !arc || !phase || sameSpot;
+  }
+
+  function fillPhases() {
+    const arc = selectedArc();
+    phaseSelect.innerHTML = (arc?.phases ?? [])
+      .map((phase) => `<option value="${phase.id}" ${phase.id === currentPhaseId && arc.id === currentArcId ? "selected" : ""}>${escapeHtml(phase.title)}</option>`)
+      .join("");
+    renderSummary();
+  }
+
+  function fillArcs() {
+    const story = selectedStory();
+    arcSelect.innerHTML = (story?.arcs ?? [])
+      .map((arc) => `<option value="${arc.id}" ${arc.id === currentArcId && story.id === currentStoryId ? "selected" : ""}>${escapeHtml(arc.title)}</option>`)
+      .join("");
+    fillPhases();
+  }
+
+  storySelect.innerHTML = availableStories
+    .map((story) => `<option value="${story.id}" ${story.id === currentStoryId ? "selected" : ""}>${escapeHtml(story.title)}</option>`)
+    .join("");
+
+  storySelect.addEventListener("change", fillArcs);
+  arcSelect.addEventListener("change", fillPhases);
+  phaseSelect.addEventListener("change", renderSummary);
+
+  modal.querySelector("#transfer-cancel").addEventListener("click", close);
+  confirmButton.addEventListener("click", async () => {
+    const phase = selectedPhase();
+    const arc = selectedArc();
+    if (!phase || !arc) {
+      return;
+    }
+
+    await state.adapter.transferChapter(chapterId, arc.id, phase.id);
+    close();
+    state.saveStatus = "Chapter moved to a new story location.";
+    return render();
+  });
+
+  fillArcs();
+}
+
 async function showLoginModal() {
   if (state.currentUser) {
     await state.authClient.signOut();
@@ -1319,11 +1561,6 @@ async function showLoginModal() {
   if (state.authClient.mode === "firebase") {
     try {
       const user = await state.authClient.signIn();
-      await state.adapter.seedDemoStory?.({
-        id: user.uid,
-        name: user.displayName || user.email || "Creator",
-        email: user.email,
-      });
       persistSession({
         id: user.uid,
         name: user.displayName || user.email || "Creator",
@@ -1458,6 +1695,13 @@ function normalizeExternalImageUrl(value) {
     throw new Error("Use an http or https image URL.");
   }
 
+  const isImgurHost = parsed.hostname === "imgur.com" || parsed.hostname === "www.imgur.com" || parsed.hostname === "i.imgur.com";
+  const fileName = parsed.pathname.split("/").filter(Boolean).pop() ?? "";
+  const hasExtension = /\.[a-z0-9]{2,5}$/i.test(fileName);
+  if (isImgurHost && fileName && !hasExtension) {
+    parsed.pathname = `${parsed.pathname}.png`;
+  }
+
   return parsed.toString();
 }
 
@@ -1469,6 +1713,7 @@ async function addExternalAsset(chapterId) {
 
   const nameInput = document.querySelector("#asset-name-input");
   const urlInput = document.querySelector("#asset-url-input");
+  const titleInput = document.querySelector("#chapter-title-input");
   const bodyInput = document.querySelector("#chapter-body-input");
 
   const name = nameInput?.value.trim() || "image";
@@ -1481,14 +1726,21 @@ async function addExternalAsset(chapterId) {
   };
 
   const nextAssets = [...(chapter.assets ?? []), nextAsset];
-  const nextBody = `${bodyInput?.value ?? chapter.body ?? ""}\n![${name}](${url})`;
 
   await state.adapter.updateChapter(chapterId, {
+    title: titleInput?.value.trim() || chapter.title || "Untitled Chapter",
+    body: bodyInput?.value ?? chapter.body ?? "",
     assets: nextAssets,
-    body: nextBody,
   });
 
-  state.saveStatus = "External image link added and markdown updated.";
+  if (nameInput) {
+    nameInput.value = "";
+  }
+  if (urlInput) {
+    urlInput.value = "";
+  }
+
+  state.saveStatus = "External image link added to the chapter assets.";
   await render();
 }
 
@@ -1603,6 +1855,88 @@ document.addEventListener("click", async (event) => {
     return render();
   }
 
+  if (action === "open-story-transfer") {
+    const query = getRouteQuery();
+    query.set("transfer", "1");
+    return navigate(`/stories/${actionTarget.dataset.storyId}?${query.toString()}`);
+  }
+
+  if (action === "close-story-transfer") {
+    const query = getRouteQuery();
+    query.delete("transfer");
+    const nextQuery = query.toString();
+    return navigate(`/stories/${actionTarget.dataset.storyId}${nextQuery ? `?${nextQuery}` : ""}`);
+  }
+
+  if (action === "submit-story-transfer") {
+    const user = getUser();
+    if (!user?.email) {
+      state.saveStatus = "Sign in with an email address before transferring ownership.";
+      return render();
+    }
+
+    const email = document.querySelector("#story-transfer-email-input")?.value.trim() ?? "";
+    const confirmation = document.querySelector("#story-transfer-confirm-input")?.value.trim() ?? "";
+    if (!email) {
+      state.saveStatus = "Enter the recipient Gmail address first.";
+      return render();
+    }
+    if (email.toLowerCase() === String(user.email).trim().toLowerCase()) {
+      state.saveStatus = "You cannot transfer a story to your own email.";
+      return render();
+    }
+    if (confirmation !== "TRANSFER") {
+      state.saveStatus = "Type TRANSFER exactly to confirm ownership transfer.";
+      return render();
+    }
+
+    await state.adapter.requestStoryTransfer(actionTarget.dataset.storyId, email, {
+      id: user.id,
+      name: getDisplayName(user),
+      email: user.email,
+    });
+    state.saveStatus = "Ownership transfer request sent. The story stays with you until the recipient accepts.";
+    const query = getRouteQuery();
+    query.delete("transfer");
+    const nextQuery = query.toString();
+    return navigate(`/stories/${actionTarget.dataset.storyId}${nextQuery ? `?${nextQuery}` : ""}`);
+  }
+
+  if (action === "cancel-story-transfer") {
+    await state.adapter.cancelStoryTransfer(actionTarget.dataset.storyId);
+    state.saveStatus = "Ownership transfer cancelled.";
+    return render();
+  }
+
+  if (action === "accept-story-transfer") {
+    const user = getUser();
+    try {
+      await state.adapter.acceptStoryTransfer(actionTarget.dataset.storyId, {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        penName: user.penName ?? "",
+      });
+      state.saveStatus = "Story ownership transferred to you.";
+      return navigate("/creator");
+    } catch (error) {
+      state.saveStatus = `Transfer accept failed: ${String(error?.message || error)}`;
+      return render();
+    }
+  }
+
+  if (action === "decline-story-transfer") {
+    const user = getUser();
+    try {
+      await state.adapter.declineStoryTransfer(actionTarget.dataset.storyId, user.email);
+      state.saveStatus = "Ownership transfer declined.";
+      return render();
+    } catch (error) {
+      state.saveStatus = `Transfer decline failed: ${String(error?.message || error)}`;
+      return render();
+    }
+  }
+
   if (action === "create-arc") {
     const storyId = actionTarget.dataset.storyId;
     const arc = await state.adapter.createArc(storyId, `Arc ${Math.floor(Math.random() * 90 + 10)}`);
@@ -1673,6 +2007,15 @@ document.addEventListener("click", async (event) => {
     await state.adapter.renamePhase(actionTarget.dataset.arcId, actionTarget.dataset.phaseId, title);
     state.saveStatus = "Phase renamed.";
     return render();
+  }
+
+  if (action === "open-transfer-chapter") {
+    return showTransferChapterModal({
+      chapterId: actionTarget.dataset.chapterId,
+      currentStoryId: actionTarget.dataset.storyId,
+      currentArcId: actionTarget.dataset.arcId,
+      currentPhaseId: actionTarget.dataset.phaseId,
+    });
   }
 
   if (action === "move-chapter-up" || action === "move-chapter-down") {
@@ -1887,7 +2230,7 @@ document.addEventListener("drop", async (event) => {
 window.addEventListener("hashchange", () => {
   state.saveStatus = "";
   window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-  render();
+  safeRender();
 });
 
 async function bootstrap() {
@@ -1899,7 +2242,7 @@ async function bootstrap() {
     state.authClient.watchAuth((user) => {
       if (!user) {
         persistSession(null);
-        render();
+        safeRender();
       } else {
         persistSession({
           id: user.uid,
@@ -1907,7 +2250,7 @@ async function bootstrap() {
           email: user.email,
           mode: "firebase",
         });
-        syncUserProfile().finally(() => render());
+        syncUserProfile().finally(() => safeRender());
       }
     });
   } else if (state.currentUser?.id) {
@@ -1917,7 +2260,7 @@ async function bootstrap() {
   if (!window.location.hash) {
     navigate("/");
   } else {
-    render();
+    safeRender();
   }
 }
 

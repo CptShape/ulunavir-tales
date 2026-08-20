@@ -18,12 +18,17 @@ const demoArcId = "arc-demo";
 const demoChapterId = "chapter-demo";
 const DEFAULT_PHASE_TITLE = "Chapters";
 
+function normalizeEmail(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
 const starterState = {
   users: {
     "demo-user": {
       id: "demo-user",
       name: "Demo Creator",
       email: "demo@storyforge.local",
+      emailLower: "demo@storyforge.local",
       penName: "",
     },
   },
@@ -35,6 +40,9 @@ const starterState = {
       visibility: "public",
       creatorId: "demo-user",
       creatorName: "Demo Creator",
+      pendingTransfer: null,
+      pendingTransferEmailLower: "",
+      pendingTransferStatus: "",
       arcIds: [demoArcId],
       createdAt: new Date("2026-08-18T10:00:00Z").toISOString(),
       updatedAt: new Date("2026-08-18T10:00:00Z").toISOString(),
@@ -153,6 +161,9 @@ function normalizeStory(story, state) {
 
   return {
     ...story,
+    pendingTransfer: story.pendingTransfer ?? null,
+    pendingTransferEmailLower: story.pendingTransferEmailLower ?? "",
+    pendingTransferStatus: story.pendingTransferStatus ?? "",
     arcIds: story.arcIds ?? [],
     arcs,
   };
@@ -214,10 +225,11 @@ function createLocalAdapter() {
     },
     async updateUserProfile(userId, patch) {
       const state = loadLocalState();
-      const current = state.users[userId] ?? { id: userId, name: patch.name ?? "Creator", email: patch.email ?? "", penName: "" };
+      const current = state.users[userId] ?? { id: userId, name: patch.name ?? "Creator", email: patch.email ?? "", emailLower: normalizeEmail(patch.email), penName: "" };
       state.users[userId] = {
         ...current,
         ...patch,
+        emailLower: normalizeEmail(patch.email ?? current.email),
       };
 
       const displayName = state.users[userId].penName?.trim() || state.users[userId].name || "Creator";
@@ -229,6 +241,18 @@ function createLocalAdapter() {
 
       saveLocalState(state);
       return state.users[userId];
+    },
+    async listIncomingStoryTransfers(email) {
+      const state = loadLocalState();
+      const emailLower = normalizeEmail(email);
+      if (!emailLower) {
+        return [];
+      }
+
+      return Object.values(state.stories)
+        .filter((story) => story.pendingTransferStatus === "pending" && story.pendingTransferEmailLower === emailLower)
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+        .map((story) => normalizeStory(story, state));
     },
     async listCreatorStories(userId) {
       if (!userId) {
@@ -310,6 +334,94 @@ function createLocalAdapter() {
       };
       saveLocalState(state);
       return normalizeStory(state.stories[storyId], state);
+    },
+    async requestStoryTransfer(storyId, targetEmail, requestedBy) {
+      const state = loadLocalState();
+      const story = state.stories[storyId];
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+
+      const targetEmailLower = normalizeEmail(targetEmail);
+      if (!targetEmailLower) {
+        throw new Error("Enter a valid Gmail address.");
+      }
+
+      story.pendingTransfer = {
+        targetEmail: String(targetEmail).trim(),
+        targetEmailLower,
+        requestedBy: requestedBy?.id ?? story.creatorId,
+        requestedByName: requestedBy?.name ?? story.creatorName,
+        requestedAt: new Date().toISOString(),
+        status: "pending",
+      };
+      story.pendingTransferEmailLower = targetEmailLower;
+      story.pendingTransferStatus = "pending";
+      story.updatedAt = new Date().toISOString();
+      saveLocalState(state);
+      return normalizeStory(story, state);
+    },
+    async cancelStoryTransfer(storyId) {
+      const state = loadLocalState();
+      const story = state.stories[storyId];
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+
+      story.pendingTransfer = null;
+      story.pendingTransferEmailLower = "";
+      story.pendingTransferStatus = "";
+      story.updatedAt = new Date().toISOString();
+      saveLocalState(state);
+      return normalizeStory(story, state);
+    },
+    async acceptStoryTransfer(storyId, user) {
+      const state = loadLocalState();
+      const story = state.stories[storyId];
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+
+      const userEmailLower = normalizeEmail(user?.email);
+      if (!userEmailLower || story.pendingTransferStatus !== "pending" || story.pendingTransferEmailLower !== userEmailLower) {
+        throw new Error("This transfer request is no longer available.");
+      }
+
+      const profile = state.users[user.id] ?? {
+        id: user.id,
+        name: user.name ?? "Creator",
+        email: user.email ?? "",
+        emailLower: userEmailLower,
+        penName: user.penName ?? "",
+      };
+      state.users[user.id] = profile;
+
+      story.creatorId = user.id;
+      story.creatorName = profile.penName?.trim() || profile.name || user.name || "Creator";
+      story.pendingTransfer = null;
+      story.pendingTransferEmailLower = "";
+      story.pendingTransferStatus = "";
+      story.updatedAt = new Date().toISOString();
+      saveLocalState(state);
+      return normalizeStory(story, state);
+    },
+    async declineStoryTransfer(storyId, email) {
+      const state = loadLocalState();
+      const story = state.stories[storyId];
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+
+      if (story.pendingTransferStatus !== "pending" || story.pendingTransferEmailLower !== normalizeEmail(email)) {
+        throw new Error("This transfer request is no longer available.");
+      }
+
+      story.pendingTransfer = null;
+      story.pendingTransferEmailLower = "";
+      story.pendingTransferStatus = "";
+      story.updatedAt = new Date().toISOString();
+      saveLocalState(state);
+      return normalizeStory(story, state);
     },
     async createArc(storyId, title) {
       const state = loadLocalState();
@@ -463,6 +575,60 @@ function createLocalAdapter() {
       state.stories[arc.storyId].updatedAt = arc.updatedAt;
       saveLocalState(state);
     },
+    async transferChapter(chapterId, targetArcId, targetPhaseId) {
+      const state = loadLocalState();
+      const chapter = state.chapters[chapterId];
+      const targetArc = state.arcs[targetArcId];
+      if (!chapter) {
+        throw new Error("Chapter not found.");
+      }
+      if (!targetArc) {
+        throw new Error("Target arc not found.");
+      }
+
+      ensureLocalArcMigration(state, chapter.arcId);
+      ensureLocalArcMigration(state, targetArcId);
+
+      const sourceArc = state.arcs[chapter.arcId];
+      const nextTargetArc = state.arcs[targetArcId];
+      const targetPhase = (nextTargetArc.phases ?? []).find((entry) => entry.id === targetPhaseId);
+      if (!targetPhase) {
+        throw new Error("Target phase not found.");
+      }
+
+      const now = new Date().toISOString();
+      if (sourceArc) {
+        sourceArc.chapterIds = (sourceArc.chapterIds ?? []).filter((id) => id !== chapterId);
+        sourceArc.phases = (sourceArc.phases ?? []).map((phase) => ({
+          ...phase,
+          chapterIds: (phase.chapterIds ?? []).filter((id) => id !== chapterId),
+        }));
+        sourceArc.updatedAt = now;
+        if (state.stories[sourceArc.storyId]) {
+          state.stories[sourceArc.storyId].updatedAt = now;
+        }
+      }
+
+      nextTargetArc.phases = (nextTargetArc.phases ?? []).map((phase) =>
+        phase.id === targetPhaseId
+          ? { ...phase, chapterIds: [...(phase.chapterIds ?? []), chapterId] }
+          : phase,
+      );
+      nextTargetArc.chapterIds = flattenPhaseChapterIds(nextTargetArc.phases);
+      nextTargetArc.updatedAt = now;
+      if (state.stories[nextTargetArc.storyId]) {
+        state.stories[nextTargetArc.storyId].updatedAt = now;
+      }
+
+      state.chapters[chapterId] = {
+        ...chapter,
+        arcId: targetArcId,
+        updatedAt: now,
+      };
+
+      saveLocalState(state);
+      return state.chapters[chapterId];
+    },
     async reorderPhaseChapters(arcId, phaseId, chapterIds) {
       const state = loadLocalState();
       ensureLocalArcMigration(state, arcId);
@@ -546,6 +712,9 @@ function createLocalAdapter() {
 function storySummary(story) {
   return {
     ...story,
+    pendingTransfer: story.pendingTransfer ?? null,
+    pendingTransferEmailLower: story.pendingTransferEmailLower ?? "",
+    pendingTransferStatus: story.pendingTransferStatus ?? "",
     arcIds: story.arcIds ?? [],
     tags: story.tags ?? [],
     arcs: (story.arcIds ?? []).map((arcId) => ({ id: arcId })),
@@ -637,6 +806,7 @@ async function touchUserProfile(db, user) {
     id: user.id,
     name: user.name ?? "Creator",
     email: user.email ?? "",
+    emailLower: normalizeEmail(user.email),
     penName: user.penName ?? (current.exists() ? current.data().penName : "") ?? "",
     structureView: user.structureView ?? (current.exists() ? current.data().structureView : "list") ?? "list",
     updatedAt: new Date().toISOString(),
@@ -673,6 +843,7 @@ function createFirebaseAdapter(authClient) {
         id: userId,
         updatedAt: new Date().toISOString(),
         ...patch,
+        emailLower: normalizeEmail(patch.email ?? (current.exists() ? current.data().email : "")),
       };
 
       if (current.exists()) {
@@ -698,6 +869,23 @@ function createFirebaseAdapter(authClient) {
       );
 
       return profile;
+    },
+    async listIncomingStoryTransfers(email) {
+      const emailLower = normalizeEmail(email);
+      if (!emailLower) {
+        return [];
+      }
+
+      const storySnapshots = await getDocs(
+        query(
+          collection(db, "stories"),
+          where("pendingTransferStatus", "==", "pending"),
+          where("pendingTransferEmailLower", "==", emailLower),
+        ),
+      );
+      return storySnapshots.docs
+        .map((item) => storySummary({ id: item.id, ...item.data() }))
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
     },
     async listCreatorStories(userId) {
       if (!userId) {
@@ -801,6 +989,78 @@ function createFirebaseAdapter(authClient) {
     async updateStory(storyId, patch) {
       await updateDoc(doc(db, "stories", storyId), {
         ...patch,
+        updatedAt: new Date().toISOString(),
+      });
+      return fetchStoryBundle(db, storyId);
+    },
+    async requestStoryTransfer(storyId, targetEmail, requestedBy) {
+      const targetEmailLower = normalizeEmail(targetEmail);
+      if (!targetEmailLower) {
+        throw new Error("Enter a valid Gmail address.");
+      }
+
+      await updateDoc(doc(db, "stories", storyId), {
+        pendingTransfer: {
+          targetEmail: String(targetEmail).trim(),
+          targetEmailLower,
+          requestedBy: requestedBy?.id ?? "",
+          requestedByName: requestedBy?.name ?? "Creator",
+          requestedAt: new Date().toISOString(),
+          status: "pending",
+        },
+        pendingTransferEmailLower: targetEmailLower,
+        pendingTransferStatus: "pending",
+        updatedAt: new Date().toISOString(),
+      });
+      return fetchStoryBundle(db, storyId);
+    },
+    async cancelStoryTransfer(storyId) {
+      await updateDoc(doc(db, "stories", storyId), {
+        pendingTransfer: null,
+        pendingTransferEmailLower: "",
+        pendingTransferStatus: "",
+        updatedAt: new Date().toISOString(),
+      });
+      return fetchStoryBundle(db, storyId);
+    },
+    async acceptStoryTransfer(storyId, user) {
+      const story = await fetchStoryBundle(db, storyId);
+      const userEmailLower = normalizeEmail(user?.email);
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+      if (!userEmailLower || story.pendingTransferStatus !== "pending" || story.pendingTransferEmailLower !== userEmailLower) {
+        throw new Error("This transfer request is no longer available.");
+      }
+
+      await touchUserProfile(db, user);
+      const profileSnapshot = await getDoc(doc(db, "users", user.id));
+      const profile = applyDocId(profileSnapshot) ?? user;
+      const displayName = profile.penName?.trim() || profile.name || user.name || "Creator";
+      const now = new Date().toISOString();
+      await updateDoc(doc(db, "stories", storyId), {
+        creatorId: user.id,
+        creatorName: displayName,
+        pendingTransfer: null,
+        pendingTransferEmailLower: "",
+        pendingTransferStatus: "",
+        updatedAt: now,
+      });
+      return fetchStoryBundle(db, storyId);
+    },
+    async declineStoryTransfer(storyId, email) {
+      const story = await fetchStoryBundle(db, storyId);
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+      if (story.pendingTransferStatus !== "pending" || story.pendingTransferEmailLower !== normalizeEmail(email)) {
+        throw new Error("This transfer request is no longer available.");
+      }
+
+      await updateDoc(doc(db, "stories", storyId), {
+        pendingTransfer: null,
+        pendingTransferEmailLower: "",
+        pendingTransferStatus: "",
         updatedAt: new Date().toISOString(),
       });
       return fetchStoryBundle(db, storyId);
@@ -1013,6 +1273,75 @@ function createFirebaseAdapter(authClient) {
         updatedAt: now,
       });
     },
+    async transferChapter(chapterId, targetArcId, targetPhaseId) {
+      const chapterRef = doc(db, "chapters", chapterId);
+      const chapterSnapshot = await getDoc(chapterRef);
+      const chapter = applyDocId(chapterSnapshot);
+      if (!chapter) {
+        throw new Error("Chapter not found.");
+      }
+
+      const sourceArcRef = doc(db, "arcs", chapter.arcId);
+      const targetArcRef = doc(db, "arcs", targetArcId);
+      const [sourceArcSnapshot, targetArcSnapshot] = await Promise.all([
+        getDoc(sourceArcRef),
+        getDoc(targetArcRef),
+      ]);
+      const rawSourceArc = applyDocId(sourceArcSnapshot);
+      const rawTargetArc = applyDocId(targetArcSnapshot);
+      const sourceArc = rawSourceArc ? ensureArcPhasesData(rawSourceArc) : null;
+      const targetArc = rawTargetArc ? ensureArcPhasesData(rawTargetArc) : null;
+      if (!sourceArc) {
+        throw new Error("Source arc not found.");
+      }
+      if (!targetArc) {
+        throw new Error("Target arc not found.");
+      }
+
+      const targetPhase = (targetArc.phases ?? []).find((phase) => phase.id === targetPhaseId);
+      if (!targetPhase) {
+        throw new Error("Target phase not found.");
+      }
+
+      const nextSourcePhases = sourceArc.phases.map((phase) => ({
+        ...phase,
+        chapterIds: (phase.chapterIds ?? []).filter((id) => id !== chapterId),
+      }));
+      const nextTargetPhases = targetArc.phases.map((phase) =>
+        phase.id === targetPhaseId
+          ? { ...phase, chapterIds: [...(phase.chapterIds ?? []), chapterId] }
+          : phase,
+      );
+
+      const now = new Date().toISOString();
+      await Promise.all([
+        updateDoc(sourceArcRef, {
+          phases: nextSourcePhases,
+          chapterIds: flattenPhaseChapterIds(nextSourcePhases),
+          updatedAt: now,
+        }),
+        updateDoc(targetArcRef, {
+          phases: nextTargetPhases,
+          chapterIds: flattenPhaseChapterIds(nextTargetPhases),
+          updatedAt: now,
+        }),
+        updateDoc(chapterRef, {
+          arcId: targetArcId,
+          updatedAt: now,
+        }),
+      ]);
+
+      await Promise.all([
+        updateDoc(doc(db, "stories", sourceArc.storyId), {
+          updatedAt: now,
+        }),
+        updateDoc(doc(db, "stories", targetArc.storyId), {
+          updatedAt: now,
+        }),
+      ]);
+
+      return this.getChapter(chapterId);
+    },
     async reorderPhaseChapters(arcId, phaseId, chapterIds) {
       const arcRef = doc(db, "arcs", arcId);
       const arcSnapshot = await getDoc(arcRef);
@@ -1100,62 +1429,6 @@ function createFirebaseAdapter(authClient) {
       }
 
       await deleteDoc(doc(db, "stories", storyId));
-    },
-    async seedDemoStory(user) {
-      if (!user?.id) {
-        return;
-      }
-
-      const existing = await getDocs(query(collection(db, "stories"), where("creatorId", "==", user.id), limit(1)));
-      if (!existing.empty) {
-        await touchUserProfile(db, user);
-        return;
-      }
-
-      const storyId = makeId("story");
-      const arcId = makeId("arc");
-      const chapterId = makeId("chapter");
-      const now = new Date().toISOString();
-
-      await setDoc(doc(db, "stories", storyId), {
-        id: storyId,
-        title: "Your First Story",
-        tags: ["draft"],
-        visibility: "private",
-        creatorId: user.id,
-        creatorName: user.name ?? "Creator",
-        arcIds: [arcId],
-        createdAt: now,
-        updatedAt: now,
-      });
-
-      await setDoc(doc(db, "arcs", arcId), {
-        id: arcId,
-        storyId,
-        title: "Opening Arc",
-        chapterIds: [chapterId],
-        phases: [
-          {
-            id: makeId("phase"),
-            title: DEFAULT_PHASE_TITLE,
-            chapterIds: [chapterId],
-          },
-        ],
-        createdAt: now,
-        updatedAt: now,
-      });
-
-      await setDoc(doc(db, "chapters", chapterId), {
-        id: chapterId,
-        arcId,
-        title: "Chapter One",
-        body: "# Welcome\n\nThis story is now stored in Firestore.",
-        assets: [],
-        createdAt: now,
-        updatedAt: now,
-      });
-
-      await touchUserProfile(db, user);
     },
   };
 }
