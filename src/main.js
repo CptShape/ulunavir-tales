@@ -505,7 +505,9 @@ function deactivateSoundtrackQueue() {
 }
 
 function renderMarkdown(markdown) {
-  const escaped = escapeHtml(markdown);
+  const escaped = escapeHtml(markdown)
+    .replace(/&lt;br\s*\/?&gt;/gi, "<br />")
+    .replace(/\n{3,}/g, (match) => `\n\n${"<br />\n".repeat(match.length - 2)}\n`);
   const fenced = escaped.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
   const imageified = fenced.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<p><img alt="$1" src="$2" /></p>');
   const linked = imageified.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');

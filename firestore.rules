@@ -17,6 +17,19 @@ service cloud.firestore {
       return signedIn() && storyDoc(storyId).data.creatorId == request.auth.uid;
     }
 
+    function storyIsSharedById(storyId) {
+      return storyDoc(storyId).data.visibility == "public"
+        || storyDoc(storyId).data.visibility == "unlisted";
+    }
+
+    function canReadStoryById(storyId) {
+      return storyIsSharedById(storyId) || ownsStoryById(storyId);
+    }
+
+    function canReadArcById(arcId) {
+      return canReadStoryById(arcDoc(arcId).data.storyId);
+    }
+
     function canEditStoryById(storyId) {
       return signedIn()
         && (
@@ -51,20 +64,20 @@ service cloud.firestore {
     }
 
     match /stories/{storyId} {
-      allow read: if signedIn();
+      allow read: if canReadStoryById(storyId);
       allow create: if signedIn() && request.resource.data.creatorId == request.auth.uid;
       allow update: if canEditStoryById(storyId);
       allow delete: if ownsStoryById(storyId);
     }
 
     match /arcs/{arcId} {
-      allow read: if signedIn();
+      allow read: if canReadArcById(arcId);
       allow create: if signedIn() && canEditStoryById(request.resource.data.storyId);
       allow update, delete: if canEditArcById(arcId);
     }
 
     match /chapters/{chapterId} {
-      allow read: if signedIn();
+      allow read: if canReadArcById(resource.data.arcId);
       allow create: if signedIn() && canEditArcById(request.resource.data.arcId);
       allow update, delete: if canEditArcById(resource.data.arcId);
     }
