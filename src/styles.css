@@ -269,9 +269,12 @@ a {
   gap: 10px;
   justify-items: center;
   width: 100%;
+  position: relative;
 }
 
 .quick-tool-button {
+  position: relative;
+  overflow: hidden;
   width: 48px;
   height: 48px;
   border-radius: 18px;
@@ -286,10 +289,49 @@ a {
   color: #24160d;
 }
 
+.quick-tool-button::before {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: var(--volume-fill, 0%);
+  background: linear-gradient(180deg, rgba(212, 172, 103, 0.18), rgba(212, 172, 103, 0.72));
+  pointer-events: none;
+}
+
+.quick-tool-button > * {
+  position: relative;
+  z-index: 1;
+}
+
+.volume-button.is-open {
+  border-color: rgba(255, 223, 164, 0.36);
+  box-shadow: 0 0 0 1px rgba(225, 193, 119, 0.18), 0 10px 24px rgba(0, 0, 0, 0.34);
+}
+
 .quick-tool-icon {
   display: inline-block;
   font-size: 1.3rem;
   line-height: 1;
+}
+
+.volume-popout {
+  position: absolute;
+  right: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 74px;
+  padding: 12px 10px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(58, 40, 28, 0.96), rgba(23, 17, 13, 0.98)),
+    var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+
+.volume-slider {
+  width: 100%;
+  accent-color: var(--gold-bright);
 }
 
 .quick-tool-caption,
