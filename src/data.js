@@ -6,7 +6,6 @@ import {
   getDocs,
   limit,
   query,
-  serverTimestamp,
   setDoc,
   updateDoc,
   where,
@@ -17,6 +16,7 @@ const STORAGE_KEY = "storyforge-state-v1";
 const demoStoryId = "story-demo";
 const demoArcId = "arc-demo";
 const demoChapterId = "chapter-demo";
+const DEFAULT_PHASE_TITLE = "Chapters";
 
 const starterState = {
   users: {
@@ -46,6 +46,13 @@ const starterState = {
       storyId: demoStoryId,
       title: "Tide One",
       chapterIds: [demoChapterId],
+      phases: [
+        {
+          id: "phase-demo",
+          title: DEFAULT_PHASE_TITLE,
+          chapterIds: [demoChapterId],
+        },
+      ],
       createdAt: new Date("2026-08-18T10:00:00Z").toISOString(),
       updatedAt: new Date("2026-08-18T10:00:00Z").toISOString(),
     },
@@ -69,6 +76,51 @@ function makeId(prefix) {
 
 function deepClone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function flattenPhaseChapterIds(phases) {
+  return phases.flatMap((phase) => phase.chapterIds ?? []);
+}
+
+function buildDefaultPhase(chapterIds = []) {
+  return {
+    id: makeId("phase"),
+    title: DEFAULT_PHASE_TITLE,
+    chapterIds: [...chapterIds],
+  };
+}
+
+function ensureArcPhasesData(arc) {
+  const sourceChapterIds = [...(arc.chapterIds ?? [])];
+  const existingPhases = Array.isArray(arc.phases) && arc.phases.length ? arc.phases.map((phase) => ({
+    id: phase.id ?? makeId("phase"),
+    title: phase.title?.trim() || DEFAULT_PHASE_TITLE,
+    chapterIds: [...(phase.chapterIds ?? [])],
+  })) : [buildDefaultPhase(sourceChapterIds)];
+
+  const seen = new Set();
+  for (const phase of existingPhases) {
+    phase.chapterIds = phase.chapterIds.filter((chapterId) => {
+      if (!chapterId || seen.has(chapterId)) {
+        return false;
+      }
+
+      seen.add(chapterId);
+      return true;
+    });
+  }
+
+  const unassigned = sourceChapterIds.filter((chapterId) => !seen.has(chapterId));
+  if (unassigned.length) {
+    existingPhases[0].chapterIds.push(...unassigned);
+  }
+
+  const orderedChapterIds = flattenPhaseChapterIds(existingPhases);
+  return {
+    ...arc,
+    chapterIds: orderedChapterIds,
+    phases: existingPhases,
+  };
 }
 
 function loadLocalState() {
@@ -104,15 +156,46 @@ function normalizeStory(story, state) {
 }
 
 function normalizeArc(arc, state) {
-  const chapters = (arc.chapterIds ?? [])
+  const preparedArc = ensureArcPhasesData(arc);
+  const chapters = preparedArc.chapterIds
     .map((chapterId) => state.chapters[chapterId])
     .filter(Boolean);
 
   return {
-    ...arc,
-    chapterIds: arc.chapterIds ?? [],
+    ...preparedArc,
+    chapterIds: preparedArc.chapterIds ?? [],
     chapters,
+    phases: preparedArc.phases.map((phase) => ({
+      ...phase,
+      chapters: phase.chapterIds.map((chapterId) => state.chapters[chapterId]).filter(Boolean),
+    })),
   };
+}
+
+function ensureLocalArcMigration(state, arcId) {
+  const arc = state.arcs[arcId];
+  if (!arc) {
+    return false;
+  }
+
+  const nextArc = ensureArcPhasesData(arc);
+  const changed = JSON.stringify({
+    chapterIds: arc.chapterIds ?? [],
+    phases: arc.phases ?? [],
+  }) !== JSON.stringify({
+    chapterIds: nextArc.chapterIds,
+    phases: nextArc.phases,
+  });
+
+  if (changed) {
+    state.arcs[arcId] = {
+      ...state.arcs[arcId],
+      chapterIds: nextArc.chapterIds,
+      phases: nextArc.phases,
+    };
+  }
+
+  return changed;
 }
 
 function createLocalAdapter() {
@@ -170,11 +253,22 @@ function createLocalAdapter() {
     },
     async getStory(storyId) {
       const state = loadLocalState();
+      let changed = false;
+      for (const arcId of state.stories[storyId]?.arcIds ?? []) {
+        changed = ensureLocalArcMigration(state, arcId) || changed;
+      }
+      if (changed) {
+        saveLocalState(state);
+      }
       const story = state.stories[storyId];
       return story ? normalizeStory(story, state) : null;
     },
     async getArc(arcId) {
       const state = loadLocalState();
+      const changed = ensureLocalArcMigration(state, arcId);
+      if (changed) {
+        saveLocalState(state);
+      }
       const arc = state.arcs[arcId];
       return arc ? normalizeArc(arc, state) : null;
     },
@@ -228,6 +322,7 @@ function createLocalAdapter() {
         storyId,
         title,
         chapterIds: [],
+        phases: [buildDefaultPhase()],
         createdAt: now,
         updatedAt: now,
       };
@@ -244,6 +339,8 @@ function createLocalAdapter() {
       }
 
       arc.title = patch.title ?? arc.title;
+      arc.phases = patch.phases ?? arc.phases;
+      arc.chapterIds = patch.chapterIds ?? arc.chapterIds;
       arc.updatedAt = new Date().toISOString();
       state.stories[arc.storyId].updatedAt = arc.updatedAt;
       saveLocalState(state);
@@ -274,6 +371,10 @@ function createLocalAdapter() {
         updatedAt: now,
       };
       arc.chapterIds.push(id);
+      if (!arc.phases?.length) {
+        arc.phases = [buildDefaultPhase()];
+      }
+      arc.phases[0].chapterIds.push(id);
       arc.updatedAt = now;
       state.stories[arc.storyId].updatedAt = now;
       saveLocalState(state);
@@ -307,6 +408,70 @@ function createLocalAdapter() {
       state.stories[state.arcs[arcId].storyId].updatedAt = state.arcs[arcId].updatedAt;
       saveLocalState(state);
     },
+    async createPhase(arcId, title) {
+      const state = loadLocalState();
+      ensureLocalArcMigration(state, arcId);
+      const arc = state.arcs[arcId];
+      const phase = {
+        id: makeId("phase"),
+        title: title?.trim() || "New Phase",
+        chapterIds: [],
+      };
+      arc.phases.push(phase);
+      arc.updatedAt = new Date().toISOString();
+      state.stories[arc.storyId].updatedAt = arc.updatedAt;
+      saveLocalState(state);
+      return phase;
+    },
+    async renamePhase(arcId, phaseId, title) {
+      const state = loadLocalState();
+      ensureLocalArcMigration(state, arcId);
+      const arc = state.arcs[arcId];
+      const phase = arc.phases.find((entry) => entry.id === phaseId);
+      if (!phase) {
+        throw new Error("Phase not found.");
+      }
+
+      phase.title = title?.trim() || DEFAULT_PHASE_TITLE;
+      arc.updatedAt = new Date().toISOString();
+      state.stories[arc.storyId].updatedAt = arc.updatedAt;
+      saveLocalState(state);
+      return phase;
+    },
+    async moveChapterToPhase(arcId, chapterId, phaseId) {
+      const state = loadLocalState();
+      ensureLocalArcMigration(state, arcId);
+      const arc = state.arcs[arcId];
+      for (const phase of arc.phases) {
+        phase.chapterIds = phase.chapterIds.filter((id) => id !== chapterId);
+      }
+
+      const targetPhase = arc.phases.find((entry) => entry.id === phaseId);
+      if (!targetPhase) {
+        throw new Error("Phase not found.");
+      }
+
+      targetPhase.chapterIds.push(chapterId);
+      arc.chapterIds = flattenPhaseChapterIds(arc.phases);
+      arc.updatedAt = new Date().toISOString();
+      state.stories[arc.storyId].updatedAt = arc.updatedAt;
+      saveLocalState(state);
+    },
+    async reorderPhaseChapters(arcId, phaseId, chapterIds) {
+      const state = loadLocalState();
+      ensureLocalArcMigration(state, arcId);
+      const arc = state.arcs[arcId];
+      const phase = arc.phases.find((entry) => entry.id === phaseId);
+      if (!phase) {
+        throw new Error("Phase not found.");
+      }
+
+      phase.chapterIds = [...chapterIds];
+      arc.chapterIds = flattenPhaseChapterIds(arc.phases);
+      arc.updatedAt = new Date().toISOString();
+      state.stories[arc.storyId].updatedAt = arc.updatedAt;
+      saveLocalState(state);
+    },
     async deleteChapter(chapterId) {
       const state = loadLocalState();
       const chapter = state.chapters[chapterId];
@@ -317,6 +482,10 @@ function createLocalAdapter() {
       const arc = state.arcs[chapter.arcId];
       if (arc) {
         arc.chapterIds = (arc.chapterIds ?? []).filter((id) => id !== chapterId);
+        arc.phases = (arc.phases ?? []).map((phase) => ({
+          ...phase,
+          chapterIds: (phase.chapterIds ?? []).filter((id) => id !== chapterId),
+        }));
         arc.updatedAt = new Date().toISOString();
         const story = state.stories[arc.storyId];
         if (story) {
@@ -394,10 +563,26 @@ async function fetchStoryBundle(db, storyId) {
   }
 
   const arcSnapshots = await getDocs(query(collection(db, "arcs"), where("storyId", "==", storyId)));
-  const arcs = sortByIdOrder(
-    arcSnapshots.docs.map((item) => ({ id: item.id, ...item.data(), chapterIds: item.data().chapterIds ?? [] })),
+  const arcs = [];
+  for (const item of sortByIdOrder(
+    arcSnapshots.docs.map((entry) => ({ id: entry.id, ...entry.data(), chapterIds: entry.data().chapterIds ?? [] })),
     story.arcIds ?? [],
-  );
+  )) {
+    const preparedArc = ensureArcPhasesData(item);
+    if (JSON.stringify({
+      chapterIds: item.chapterIds ?? [],
+      phases: item.phases ?? [],
+    }) !== JSON.stringify({
+      chapterIds: preparedArc.chapterIds,
+      phases: preparedArc.phases,
+    })) {
+      await updateDoc(doc(db, "arcs", item.id), {
+        chapterIds: preparedArc.chapterIds,
+        phases: preparedArc.phases,
+      });
+    }
+    arcs.push(preparedArc);
+  }
 
   const chapterMaps = await Promise.all(
     arcs.map(async (arc) => {
@@ -421,6 +606,10 @@ async function fetchStoryBundle(db, storyId) {
     arcs: arcs.map((arc) => ({
       ...arc,
       chapterIds: arc.chapterIds ?? [],
+      phases: arc.phases.map((phase) => ({
+        ...phase,
+        chapters: (chaptersByArcId[arc.id] ?? []).filter((chapter) => (phase.chapterIds ?? []).includes(chapter.id)),
+      })),
       chapters: chaptersByArcId[arc.id] ?? [],
     })),
   };
@@ -437,7 +626,8 @@ async function touchUserProfile(db, user) {
     id: user.id,
     name: user.name ?? "Creator",
     email: user.email ?? "",
-    penName: user.penName ?? current.data?.penName ?? "",
+    penName: user.penName ?? (current.exists() ? current.data().penName : "") ?? "",
+    structureView: user.structureView ?? (current.exists() ? current.data().structureView : "list") ?? "list",
     updatedAt: new Date().toISOString(),
   };
 
@@ -519,15 +709,36 @@ function createFirebaseAdapter(authClient) {
     },
     async getArc(arcId) {
       const arcSnapshot = await getDoc(doc(db, "arcs", arcId));
-      const arc = applyDocId(arcSnapshot);
+      const rawArc = applyDocId(arcSnapshot);
+      const arc = rawArc ? ensureArcPhasesData(rawArc) : null;
       if (!arc) {
         return null;
+      }
+
+      if (JSON.stringify({
+        chapterIds: rawArc.chapterIds ?? [],
+        phases: rawArc.phases ?? [],
+      }) !== JSON.stringify({
+        chapterIds: arc.chapterIds,
+        phases: arc.phases,
+      })) {
+        await updateDoc(doc(db, "arcs", arcId), {
+          chapterIds: arc.chapterIds,
+          phases: arc.phases,
+        });
       }
 
       const chapterSnapshots = await getDocs(query(collection(db, "chapters"), where("arcId", "==", arcId)));
       return {
         ...arc,
         chapterIds: arc.chapterIds ?? [],
+        phases: arc.phases.map((phase) => ({
+          ...phase,
+          chapters: sortByIdOrder(
+            chapterSnapshots.docs.map((item) => ({ id: item.id, ...item.data(), assets: item.data().assets ?? [] })),
+            phase.chapterIds ?? [],
+          ),
+        })),
         chapters: sortByIdOrder(
           chapterSnapshots.docs.map((item) => ({ id: item.id, ...item.data(), assets: item.data().assets ?? [] })),
           arc.chapterIds ?? [],
@@ -580,6 +791,7 @@ function createFirebaseAdapter(authClient) {
         storyId,
         title,
         chapterIds: [],
+        phases: [buildDefaultPhase()],
         createdAt: now,
         updatedAt: now,
       };
@@ -636,8 +848,14 @@ function createFirebaseAdapter(authClient) {
       };
 
       await setDoc(doc(db, "chapters", id), payload);
+      const preparedArc = ensureArcPhasesData(arc);
+      if (!preparedArc.phases.length) {
+        preparedArc.phases = [buildDefaultPhase()];
+      }
+      preparedArc.phases[0].chapterIds.push(id);
       await updateDoc(arcRef, {
         chapterIds: [...(arc.chapterIds ?? []), id],
+        phases: preparedArc.phases,
         updatedAt: now,
       });
       await updateDoc(doc(db, "stories", arc.storyId), {
@@ -686,6 +904,106 @@ function createFirebaseAdapter(authClient) {
         });
       }
     },
+    async createPhase(arcId, title) {
+      const arcRef = doc(db, "arcs", arcId);
+      const arcSnapshot = await getDoc(arcRef);
+      const rawArc = applyDocId(arcSnapshot);
+      const arc = rawArc ? ensureArcPhasesData(rawArc) : null;
+      if (!arc) {
+        throw new Error("Arc not found.");
+      }
+
+      const phase = {
+        id: makeId("phase"),
+        title: title?.trim() || "New Phase",
+        chapterIds: [],
+      };
+      const phases = [...arc.phases, phase];
+      const now = new Date().toISOString();
+      await updateDoc(arcRef, {
+        phases,
+        chapterIds: flattenPhaseChapterIds(phases),
+        updatedAt: now,
+      });
+      await updateDoc(doc(db, "stories", arc.storyId), {
+        updatedAt: now,
+      });
+      return phase;
+    },
+    async renamePhase(arcId, phaseId, title) {
+      const arcRef = doc(db, "arcs", arcId);
+      const arcSnapshot = await getDoc(arcRef);
+      const rawArc = applyDocId(arcSnapshot);
+      const arc = rawArc ? ensureArcPhasesData(rawArc) : null;
+      if (!arc) {
+        throw new Error("Arc not found.");
+      }
+
+      const phases = arc.phases.map((phase) =>
+        phase.id === phaseId
+          ? { ...phase, title: title?.trim() || DEFAULT_PHASE_TITLE }
+          : phase,
+      );
+      const now = new Date().toISOString();
+      await updateDoc(arcRef, {
+        phases,
+        updatedAt: now,
+      });
+      await updateDoc(doc(db, "stories", arc.storyId), {
+        updatedAt: now,
+      });
+      return phases.find((phase) => phase.id === phaseId);
+    },
+    async moveChapterToPhase(arcId, chapterId, phaseId) {
+      const arcRef = doc(db, "arcs", arcId);
+      const arcSnapshot = await getDoc(arcRef);
+      const rawArc = applyDocId(arcSnapshot);
+      const arc = rawArc ? ensureArcPhasesData(rawArc) : null;
+      if (!arc) {
+        throw new Error("Arc not found.");
+      }
+
+      const phases = arc.phases.map((phase) => ({
+        ...phase,
+        chapterIds: (phase.chapterIds ?? []).filter((id) => id !== chapterId),
+      }));
+      const target = phases.find((phase) => phase.id === phaseId);
+      if (!target) {
+        throw new Error("Phase not found.");
+      }
+      target.chapterIds.push(chapterId);
+      const now = new Date().toISOString();
+      await updateDoc(arcRef, {
+        phases,
+        chapterIds: flattenPhaseChapterIds(phases),
+        updatedAt: now,
+      });
+      await updateDoc(doc(db, "stories", arc.storyId), {
+        updatedAt: now,
+      });
+    },
+    async reorderPhaseChapters(arcId, phaseId, chapterIds) {
+      const arcRef = doc(db, "arcs", arcId);
+      const arcSnapshot = await getDoc(arcRef);
+      const rawArc = applyDocId(arcSnapshot);
+      const arc = rawArc ? ensureArcPhasesData(rawArc) : null;
+      if (!arc) {
+        throw new Error("Arc not found.");
+      }
+
+      const phases = arc.phases.map((phase) =>
+        phase.id === phaseId ? { ...phase, chapterIds: [...chapterIds] } : phase,
+      );
+      const now = new Date().toISOString();
+      await updateDoc(arcRef, {
+        phases,
+        chapterIds: flattenPhaseChapterIds(phases),
+        updatedAt: now,
+      });
+      await updateDoc(doc(db, "stories", arc.storyId), {
+        updatedAt: now,
+      });
+    },
     async deleteChapter(chapterId) {
       const chapterSnapshot = await getDoc(doc(db, "chapters", chapterId));
       const chapter = applyDocId(chapterSnapshot);
@@ -701,6 +1019,10 @@ function createFirebaseAdapter(authClient) {
       if (arc) {
         await updateDoc(arcRef, {
           chapterIds: (arc.chapterIds ?? []).filter((id) => id !== chapterId),
+          phases: (arc.phases ?? []).map((phase) => ({
+            ...phase,
+            chapterIds: (phase.chapterIds ?? []).filter((id) => id !== chapterId),
+          })),
           updatedAt: now,
         });
         await updateDoc(doc(db, "stories", arc.storyId), {
@@ -781,6 +1103,13 @@ function createFirebaseAdapter(authClient) {
         storyId,
         title: "Opening Arc",
         chapterIds: [chapterId],
+        phases: [
+          {
+            id: makeId("phase"),
+            title: DEFAULT_PHASE_TITLE,
+            chapterIds: [chapterId],
+          },
+        ],
         createdAt: now,
         updatedAt: now,
       });

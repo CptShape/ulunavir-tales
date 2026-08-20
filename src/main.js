@@ -520,6 +520,20 @@ function renderArcCard(arc, story, owner, index, browserView = false) {
   `;
 }
 
+function renderPhaseHeader(phase, owner, browserView = false, arcId = "") {
+  return `
+    <div class="phase-separator">
+      <span class="phase-line"></span>
+      ${
+        owner && !browserView
+          ? `<button class="phase-title" data-action="rename-phase" data-arc-id="${arcId}" data-phase-id="${phase.id}" data-phase-title="${escapeHtml(phase.title)}">${escapeHtml(phase.title)}</button>`
+          : `<span class="phase-title">${escapeHtml(phase.title)}</span>`
+      }
+      <span class="phase-line"></span>
+    </div>
+  `;
+}
+
 async function renderArcPage(storyId, arcId) {
   const [story, arc] = await Promise.all([state.adapter.getStory(storyId), state.adapter.getArc(arcId)]);
   if (!story || !arc) {
@@ -532,6 +546,19 @@ async function renderArcPage(storyId, arcId) {
   if (story.visibility === "private" && !owner) {
     return renderMissing("This story is private.");
   }
+
+  const phaseSections = (arc.phases ?? []).map((phase) => `
+    <section class="phase-block stack">
+      ${renderPhaseHeader(phase, owner, browserView, arc.id)}
+      <div class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
+        ${
+          phase.chapters.length
+            ? phase.chapters.map((chapter, index) => renderChapterCard(chapter, story, arc, owner, index, browserView, phase)).join("")
+            : '<div class="empty-state">No chapters in this phase yet.</div>'
+        }
+      </div>
+    </section>
+  `).join("");
 
   layout(
     `
@@ -552,6 +579,7 @@ async function renderArcPage(storyId, arcId) {
               <button class="ghost-button ${structureView === "list" ? "is-active" : ""}" data-action="set-structure-view" data-view="list">List</button>
             </div>
             ${browserView && owner ? '<a class="ghost-button" href="#/stories/' + story.id + '/arcs/' + arc.id + '">Edit</a>' : ""}
+            ${owner && !browserView ? '<button class="ghost-button" data-action="create-phase" data-arc-id="' + arc.id + '">New phase</button>' : ""}
             ${owner && !browserView ? '<button class="primary-button" data-action="create-chapter" data-arc-id="' + arc.id + '" data-story-id="' + story.id + '">New chapter</button>' : ""}
           </div>
         </div>
@@ -562,16 +590,14 @@ async function renderArcPage(storyId, arcId) {
               <button class="ghost-button" data-action="save-arc-title" data-arc-id="${arc.id}" data-story-id="${story.id}">Rename arc</button>
             </div>
         </section>` : ""}
-        <section class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
-          ${arc.chapters.length ? arc.chapters.map((chapter, index) => renderChapterCard(chapter, story, arc, owner, index, browserView)).join("") : '<div class="empty-state">No chapters yet. Add one to begin writing.</div>'}
-        </section>
+        ${phaseSections || '<div class="empty-state">No chapters yet. Add one to begin writing.</div>'}
       </div>
     `,
     browserView ? "browser" : owner ? "creator" : "browser",
   );
 }
 
-function renderChapterCard(chapter, story, arc, owner, index, browserView = false) {
+function renderChapterCard(chapter, story, arc, owner, index, browserView = false, phase = null) {
   return `
     <article class="list-card">
       <div class="split-header">
@@ -579,12 +605,19 @@ function renderChapterCard(chapter, story, arc, owner, index, browserView = fals
           <h3>${escapeHtml(chapter.title || "Untitled chapter")}</h3>
           <p class="muted">Updated ${formatDate(chapter.updatedAt)}</p>
         </div>
-        ${owner ? `
+        ${owner && !browserView ? `
           <div class="order-buttons">
-            <button class="small-button" data-action="move-chapter-up" data-arc-id="${arc.id}" data-index="${index}" ${index === 0 ? "disabled" : ""}>↑</button>
-            <button class="small-button" data-action="move-chapter-down" data-arc-id="${arc.id}" data-index="${index}" ${index === arc.chapters.length - 1 ? "disabled" : ""}>↓</button>
+            <button class="small-button" data-action="move-chapter-up" data-arc-id="${arc.id}" data-phase-id="${phase?.id ?? ""}" data-index="${index}" ${index === 0 ? "disabled" : ""}>↑</button>
+            <button class="small-button" data-action="move-chapter-down" data-arc-id="${arc.id}" data-phase-id="${phase?.id ?? ""}" data-index="${index}" ${phase && index === phase.chapters.length - 1 ? "disabled" : ""}>↓</button>
           </div>` : ""}
       </div>
+      ${
+        owner && !browserView
+          ? `<select class="phase-select" data-action="move-chapter-phase" data-arc-id="${arc.id}" data-chapter-id="${chapter.id}">
+              ${(arc.phases ?? []).map((entry) => `<option value="${entry.id}" ${entry.id === phase?.id ? "selected" : ""}>${escapeHtml(entry.title)}</option>`).join("")}
+            </select>`
+          : ""
+      }
       <div class="card-actions">
         <a class="primary-button" href="#/stories/${story.id}/arcs/${arc.id}/chapters/${chapter.id}${browserView ? "?view=browser" : ""}">Open chapter</a>
         ${owner && !browserView ? `<button class="danger-button" data-action="delete-chapter" data-story-id="${story.id}" data-arc-id="${arc.id}" data-chapter-id="${chapter.id}">Delete</button>` : ""}
@@ -593,15 +626,15 @@ function renderChapterCard(chapter, story, arc, owner, index, browserView = fals
   `;
 }
 
-function renderChapterPager(storyId, arcId, previousChapter, nextChapter) {
+function renderChapterPager(storyId, arcId, previousChapter, nextChapter, browserView = false) {
   if (!previousChapter && !nextChapter) {
     return "";
   }
 
   return `
     <div class="chapter-pager">
-      ${previousChapter ? `<a class="ghost-button" href="#/stories/${storyId}/arcs/${arcId}/chapters/${previousChapter.id}">Previous Chapter</a>` : ""}
-      ${nextChapter ? `<a class="ghost-button" href="#/stories/${storyId}/arcs/${arcId}/chapters/${nextChapter.id}">Next Chapter</a>` : ""}
+      ${previousChapter ? `<a class="ghost-button" href="#/stories/${storyId}/arcs/${arcId}/chapters/${previousChapter.id}${browserView ? "?view=browser" : ""}">Previous Chapter</a>` : ""}
+      ${nextChapter ? `<a class="ghost-button" href="#/stories/${storyId}/arcs/${arcId}/chapters/${nextChapter.id}${browserView ? "?view=browser" : ""}">Next Chapter</a>` : ""}
     </div>
   `;
 }
@@ -626,7 +659,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
   const chapterIndex = (arc.chapters ?? []).findIndex((entry) => entry.id === chapterId);
   const previousChapter = chapterIndex > 0 ? arc.chapters[chapterIndex - 1] : null;
   const nextChapter = chapterIndex >= 0 && chapterIndex < arc.chapters.length - 1 ? arc.chapters[chapterIndex + 1] : null;
-  const chapterPager = renderChapterPager(story.id, arc.id, previousChapter, nextChapter);
+  const chapterPager = renderChapterPager(story.id, arc.id, previousChapter, nextChapter, browserView);
   const editorContent = owner && !browserView
     ? `
         <div class="editor-shell">
@@ -1097,11 +1130,35 @@ document.addEventListener("click", async (event) => {
     return navigate(`/stories/${actionTarget.dataset.storyId}/arcs/${actionTarget.dataset.arcId}/chapters/${chapter.id}`);
   }
 
+  if (action === "create-phase") {
+    const title = window.prompt("Phase title", "New Phase");
+    if (title === null) {
+      return;
+    }
+    await state.adapter.createPhase(actionTarget.dataset.arcId, title);
+    state.saveStatus = "Phase created.";
+    return render();
+  }
+
+  if (action === "rename-phase") {
+    const title = window.prompt("Rename phase", actionTarget.dataset.phaseTitle || "Phase");
+    if (title === null) {
+      return;
+    }
+    await state.adapter.renamePhase(actionTarget.dataset.arcId, actionTarget.dataset.phaseId, title);
+    state.saveStatus = "Phase renamed.";
+    return render();
+  }
+
   if (action === "move-chapter-up" || action === "move-chapter-down") {
     const arc = await state.adapter.getArc(actionTarget.dataset.arcId);
+    const phase = (arc.phases ?? []).find((entry) => entry.id === actionTarget.dataset.phaseId);
+    if (!phase) {
+      return;
+    }
     const index = Number(actionTarget.dataset.index);
     const delta = action === "move-chapter-up" ? -1 : 1;
-    await state.adapter.updateChapterOrder(arc.id, swap(arc.chapterIds, index, index + delta));
+    await state.adapter.reorderPhaseChapters(arc.id, phase.id, swap(phase.chapterIds, index, index + delta));
     return render();
   }
 
@@ -1167,6 +1224,19 @@ document.addEventListener("click", async (event) => {
       state.saveStatus = String(error.message || error);
       return render();
     }
+  }
+});
+
+document.addEventListener("change", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement)) {
+    return;
+  }
+
+  if (target.dataset.action === "move-chapter-phase") {
+    await state.adapter.moveChapterToPhase(target.dataset.arcId, target.dataset.chapterId, target.value);
+    state.saveStatus = "Chapter moved to another phase.";
+    return render();
   }
 });
 
