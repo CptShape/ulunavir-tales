@@ -25,6 +25,9 @@ const state = {
     activeKey: "",
     youtubePlayer: null,
     syncToken: 0,
+    manualPause: false,
+    recoveryTimer: null,
+    recoveryAttempts: 0,
   },
 };
 
@@ -305,8 +308,55 @@ function setSoundtrackStatus(message) {
   }
 }
 
+function clearSoundtrackRecovery() {
+  if (state.soundtrack.recoveryTimer) {
+    clearTimeout(state.soundtrack.recoveryTimer);
+    state.soundtrack.recoveryTimer = null;
+  }
+}
+
+function requestSoundtrackRecovery(reason = "Playback interrupted", delay = 2200) {
+  const active = getActiveSoundtrack();
+  if (!active || state.soundtrack.paused || state.soundtrack.manualPause) {
+    return;
+  }
+
+  clearSoundtrackRecovery();
+  const expectedTrackId = active.id;
+  const expectedToken = state.soundtrack.syncToken;
+  setSoundtrackStatus(`${reason}. Trying to resume...`);
+
+  state.soundtrack.recoveryTimer = setTimeout(() => {
+    const current = getActiveSoundtrack();
+    if (
+      !current
+      || current.id !== expectedTrackId
+      || expectedToken !== state.soundtrack.syncToken
+      || state.soundtrack.paused
+      || state.soundtrack.manualPause
+      || !state.soundtrack.youtubePlayer
+    ) {
+      return;
+    }
+
+    state.soundtrack.recoveryAttempts += 1;
+    try {
+      if (state.soundtrack.recoveryAttempts % 4 === 0 && current.videoId) {
+        state.soundtrack.youtubePlayer.loadVideoById(current.videoId);
+      } else {
+        state.soundtrack.youtubePlayer.playVideo();
+      }
+      setSoundtrackStatus(`Resuming: ${current.label}`);
+    } catch (error) {
+      setSoundtrackStatus(`Soundtrack recovery failed: ${String(error.message || error)}`);
+    }
+  }, delay);
+}
+
 function pauseCurrentSoundtrack() {
   const active = getActiveSoundtrack();
+  clearSoundtrackRecovery();
+  state.soundtrack.manualPause = true;
   if (state.soundtrack.mode === "youtube" && state.soundtrack.youtubePlayer?.pauseVideo) {
     state.soundtrack.youtubePlayer.pauseVideo();
   }
@@ -324,6 +374,9 @@ function playCurrentSoundtrack() {
     return;
   }
 
+  clearSoundtrackRecovery();
+  state.soundtrack.manualPause = false;
+  state.soundtrack.recoveryAttempts = 0;
   if (state.soundtrack.mode === "youtube" && state.soundtrack.youtubePlayer?.playVideo) {
     state.soundtrack.youtubePlayer.playVideo();
   }
@@ -342,6 +395,9 @@ function advanceSoundtrack() {
   state.soundtrack.activeKey = "";
   state.soundtrack.ready = false;
   state.soundtrack.autoplayAttempted = false;
+  state.soundtrack.manualPause = false;
+  state.soundtrack.recoveryAttempts = 0;
+  clearSoundtrackRecovery();
   persistSoundtrackUi();
   syncSoundtrackPlayback();
 }
@@ -393,18 +449,47 @@ async function ensureYouTubePlayer(track, token) {
             onReady: () => resolve(),
             onStateChange: (event) => {
               if (event.data === window.YT.PlayerState.ENDED) {
+                clearSoundtrackRecovery();
+                state.soundtrack.recoveryAttempts = 0;
                 advanceSoundtrack();
                 return;
               }
 
               if (event.data === window.YT.PlayerState.PLAYING) {
+                clearSoundtrackRecovery();
                 state.soundtrack.paused = false;
+                state.soundtrack.manualPause = false;
+                state.soundtrack.recoveryAttempts = 0;
+                const active = getActiveSoundtrack();
+                if (active) {
+                  setSoundtrackStatus(`Now playing: ${active.label}`);
+                }
                 persistSoundtrackUi();
               }
 
               if (event.data === window.YT.PlayerState.PAUSED) {
-                state.soundtrack.paused = true;
-                persistSoundtrackUi();
+                if (state.soundtrack.manualPause) {
+                  state.soundtrack.paused = true;
+                  persistSoundtrackUi();
+                  return;
+                }
+
+                requestSoundtrackRecovery("Playback paused by YouTube");
+              }
+
+              if (event.data === window.YT.PlayerState.BUFFERING) {
+                requestSoundtrackRecovery("Playback is buffering", 4500);
+              }
+
+              if (event.data === window.YT.PlayerState.CUED || event.data === window.YT.PlayerState.UNSTARTED) {
+                requestSoundtrackRecovery("Playback is waiting");
+              }
+            },
+            onError: (event) => {
+              const active = getActiveSoundtrack();
+              setSoundtrackStatus(`YouTube player error${event?.data ? ` ${event.data}` : ""}. Retrying...`);
+              if (active) {
+                requestSoundtrackRecovery("YouTube player error", 1500);
               }
             },
           },
@@ -435,7 +520,9 @@ async function ensureYouTubePlayer(track, token) {
   applySoundtrackVolume();
   setSoundtrackStatus(`Now playing: ${track.label}`);
   if (!state.soundtrack.paused) {
+    state.soundtrack.manualPause = false;
     state.soundtrack.youtubePlayer.playVideo();
+    requestSoundtrackRecovery("Playback did not start", 5000);
   }
   updateQuickToolButton();
 }
@@ -480,9 +567,12 @@ function activateSoundtrackQueue(arcId, queue) {
         ? Math.max(0, Math.min(stored.currentIndex, queue.length - 1))
         : 0;
     state.soundtrack.paused = stored.arcId === arcId ? Boolean(stored.paused) : false;
+    state.soundtrack.manualPause = state.soundtrack.paused;
     state.soundtrack.volume = typeof stored.volume === "number" ? clampVolume(stored.volume) : state.soundtrack.volume;
     state.soundtrack.ready = false;
     state.soundtrack.activeKey = "";
+    state.soundtrack.recoveryAttempts = 0;
+    clearSoundtrackRecovery();
   }
 
   persistSoundtrackUi();
@@ -490,13 +580,16 @@ function activateSoundtrackQueue(arcId, queue) {
 }
 
 function deactivateSoundtrackQueue() {
+  clearSoundtrackRecovery();
   state.soundtrack.arcId = "";
   state.soundtrack.queue = [];
   state.soundtrack.currentIndex = 0;
   state.soundtrack.paused = true;
+  state.soundtrack.manualPause = true;
   state.soundtrack.volumeOpen = false;
   state.soundtrack.activeKey = "";
   state.soundtrack.ready = false;
+  state.soundtrack.recoveryAttempts = 0;
   if (state.soundtrack.youtubePlayer?.pauseVideo) {
     state.soundtrack.youtubePlayer.pauseVideo();
   }
@@ -1062,7 +1155,7 @@ function renderPhaseHeader(phase, owner, browserView = false, arcId = "") {
 function renderSoundtrackPanel(chapter) {
   const soundtracks = chapter.soundtracks ?? [];
   return `
-    <section class="panel stack">
+    <section class="panel stack soundtrack-panel">
       <div class="section-header">
         <div>
           <h3>Soundtracks</h3>
@@ -1301,11 +1394,11 @@ async function renderChapterPage(storyId, arcId, chapterId) {
                   <div class="notice">
                     Upload the image to Imgur first, then paste the direct image URL here. This saves the asset for the chapter without changing your markdown body.
                   </div>
+                  <div class="asset-list asset-tray">
+                    ${assets.length ? assets.map((asset, index) => renderAssetItem(asset, index, { chapterId: chapter.id, editable: true })).join("") : '<div class="empty-state">No assets in this chapter yet.</div>'}
+                  </div>
                 </div>
               ` : ""}
-              <div class="asset-list">
-                ${assets.length ? assets.map(renderAssetItem).join("") : '<div class="empty-state">No assets in this chapter yet.</div>'}
-              </div>
               ${renderSoundtrackPanel(chapter)}
               <div class="notice mono">${escapeHtml(state.saveStatus || "Tip: use `![alt](image-url)` to place pasted external images into the chapter body.")}</div>
             </div>
@@ -1325,7 +1418,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
           <div class="markdown-preview">${renderMarkdown(chapter.body || "*This chapter is empty.*")}</div>
         </section>
         ${chapterPagerBottom}
-        ${assets.length ? `<section class="panel stack"><h3>Referenced images</h3><div class="asset-list">${assets.map(renderAssetItem).join("")}</div></section>` : ""}
+        ${assets.length ? `<section class="panel stack"><h3>Referenced images</h3><div class="asset-list">${assets.map((asset, index) => renderAssetItem(asset, index)).join("")}</div></section>` : ""}
       `;
 
   layout(
@@ -1362,14 +1455,28 @@ async function renderChapterPage(storyId, arcId, chapterId) {
   }
 }
 
-function renderAssetItem(asset) {
+function renderAssetItem(asset, index = 0, options = {}) {
   const sourceUrl = asset.url ?? asset.dataUrl ?? "";
   const previewable = Boolean(sourceUrl);
+  const markdown = `![${asset.name}](${sourceUrl})`;
+  const actions = options.editable
+    ? `
+        <div class="asset-actions">
+          <button class="small-button asset-action-button" type="button" title="Copy markdown" data-action="copy-asset-markdown" data-markdown="${escapeHtml(markdown)}">⧉</button>
+          <button class="small-button asset-action-button danger-icon" type="button" title="Remove image" data-action="delete-asset" data-chapter-id="${options.chapterId}" data-asset-index="${index}">🗑</button>
+        </div>
+      `
+    : `
+        <div class="asset-actions">
+          <button class="small-button asset-action-button" type="button" title="Copy markdown" data-action="copy-asset-markdown" data-markdown="${escapeHtml(markdown)}">⧉</button>
+        </div>
+      `;
   return `
     <article class="asset-item">
-      ${previewable ? `<img src="${sourceUrl}" alt="${escapeHtml(asset.name)}" />` : ""}
-      <strong>${escapeHtml(asset.name)}</strong>
-      <div class="muted mono">![${escapeHtml(asset.name)}](${sourceUrl})</div>
+      ${actions}
+      ${previewable ? `<img src="${escapeHtml(sourceUrl)}" alt="${escapeHtml(asset.name)}" />` : ""}
+      <strong title="${escapeHtml(asset.name)}">${escapeHtml(asset.name)}</strong>
+      <div class="muted mono asset-markdown" title="${escapeHtml(markdown)}">${escapeHtml(markdown)}</div>
     </article>
   `;
 }
@@ -1771,6 +1878,49 @@ async function addExternalAsset(chapterId) {
   await render();
 }
 
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const helper = document.createElement("textarea");
+  helper.value = text;
+  helper.setAttribute("readonly", "");
+  helper.style.position = "fixed";
+  helper.style.opacity = "0";
+  document.body.append(helper);
+  helper.select();
+  document.execCommand("copy");
+  helper.remove();
+}
+
+async function deleteChapterAsset(chapterId, assetIndex) {
+  const chapter = await state.adapter.getChapter(chapterId);
+  if (!chapter) {
+    throw new Error("Chapter not found.");
+  }
+
+  const assets = [...(chapter.assets ?? [])];
+  if (assetIndex < 0 || assetIndex >= assets.length) {
+    throw new Error("Image could not be found.");
+  }
+
+  assets.splice(assetIndex, 1);
+
+  const titleInput = document.querySelector("#chapter-title-input");
+  const bodyInput = document.querySelector("#chapter-body-input");
+
+  await state.adapter.updateChapter(chapterId, {
+    title: titleInput?.value.trim() || chapter.title || "Untitled Chapter",
+    body: bodyInput?.value ?? chapter.body ?? "",
+    assets,
+  });
+
+  state.saveStatus = "Image removed from chapter assets.";
+  await render();
+}
+
 async function syncUserProfile() {
   const user = getUser();
   if (!user?.id) {
@@ -2115,6 +2265,32 @@ document.addEventListener("click", async (event) => {
   if (action === "add-external-asset") {
     try {
       return await addExternalAsset(actionTarget.dataset.chapterId);
+    } catch (error) {
+      state.saveStatus = String(error.message || error);
+      return render();
+    }
+  }
+
+  if (action === "copy-asset-markdown") {
+    try {
+      await copyTextToClipboard(actionTarget.dataset.markdown ?? "");
+      state.saveStatus = "Image markdown copied to clipboard.";
+    } catch (error) {
+      state.saveStatus = `Copy failed: ${String(error.message || error)}`;
+    }
+    const statusNode = document.querySelector(".notice.mono");
+    if (statusNode) {
+      statusNode.textContent = state.saveStatus;
+    }
+    return;
+  }
+
+  if (action === "delete-asset") {
+    if (!confirmDelete("image")) {
+      return;
+    }
+    try {
+      return await deleteChapterAsset(actionTarget.dataset.chapterId, Number(actionTarget.dataset.assetIndex));
     } catch (error) {
       state.saveStatus = String(error.message || error);
       return render();
