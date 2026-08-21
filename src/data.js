@@ -52,6 +52,7 @@ const starterState = {
       visibility: "public",
       creatorId: "demo-user",
       creatorName: "Demo Creator",
+      editorEmails: [],
       pendingTransfer: null,
       pendingTransferEmailLower: "",
       pendingTransferStatus: "",
@@ -84,6 +85,8 @@ const starterState = {
       arcId: demoArcId,
       title: "Lanterns on the Pier",
       body: "# Opening scene\n\nA storm hangs over the harbor while the first lanterns come alive.",
+      renderMode: "markdown",
+      htmlBackground: "",
       assets: [],
       soundtracks: [],
       createdAt: new Date("2026-08-18T10:00:00Z").toISOString(),
@@ -280,6 +283,18 @@ function createLocalAdapter() {
           arcs: (story.arcIds ?? []).map((arcId) => ({ id: arcId })),
         }));
     },
+    async listEditorStories(email) {
+      const emailLower = normalizeEmail(email);
+      if (!emailLower) {
+        return [];
+      }
+
+      const state = loadLocalState();
+      return Object.values(state.stories)
+        .filter((story) => (story.editorEmails ?? []).includes(emailLower))
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+        .map((story) => storySummary(story));
+    },
     async listBrowserStories() {
       const state = loadLocalState();
       return Object.values(state.stories)
@@ -313,7 +328,16 @@ function createLocalAdapter() {
     },
     async getChapter(chapterId) {
       const state = loadLocalState();
-      return state.chapters[chapterId] ?? null;
+      const chapter = state.chapters[chapterId] ?? null;
+      return chapter
+        ? {
+            ...chapter,
+            renderMode: chapter.renderMode ?? "markdown",
+            htmlBackground: chapter.htmlBackground ?? "",
+            assets: chapter.assets ?? [],
+            soundtracks: chapter.soundtracks ?? [],
+          }
+        : null;
     },
     async createStory({ creatorId, creatorName, title, tags, visibility }) {
       const state = loadLocalState();
@@ -326,6 +350,7 @@ function createLocalAdapter() {
         visibility,
         creatorId,
         creatorName,
+        editorEmails: [],
         arcIds: [],
         createdAt: now,
         updatedAt: now,
@@ -346,6 +371,23 @@ function createLocalAdapter() {
       };
       saveLocalState(state);
       return normalizeStory(state.stories[storyId], state);
+    },
+    async addStoryEditor(storyId, email) {
+      const emailLower = normalizeEmail(email);
+      if (!emailLower) {
+        throw new Error("Enter a valid editor email.");
+      }
+
+      const state = loadLocalState();
+      const story = state.stories[storyId];
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+
+      story.editorEmails = [...new Set([...(story.editorEmails ?? []), emailLower])];
+      story.updatedAt = new Date().toISOString();
+      saveLocalState(state);
+      return normalizeStory(story, state);
     },
     async requestStoryTransfer(storyId, targetEmail, requestedBy) {
       const state = loadLocalState();
@@ -496,6 +538,8 @@ function createLocalAdapter() {
         arcId,
         title,
         body: "",
+        renderMode: "markdown",
+        htmlBackground: "",
         assets: [],
         soundtracks: [],
         createdAt: now,
@@ -563,11 +607,25 @@ function createLocalAdapter() {
         throw new Error("Phase not found.");
       }
 
-      phase.title = title?.trim() || DEFAULT_PHASE_TITLE;
+      const trimmedTitle = title?.trim() ?? "";
+      if (!trimmedTitle) {
+        if (arc.phases.length <= 1) {
+          phase.title = DEFAULT_PHASE_TITLE;
+        } else {
+          const phaseIndex = arc.phases.findIndex((entry) => entry.id === phaseId);
+          const targetIndex = phaseIndex < arc.phases.length - 1 ? phaseIndex + 1 : phaseIndex - 1;
+          const targetPhase = arc.phases[targetIndex];
+          targetPhase.chapterIds = [...(phase.chapterIds ?? []), ...(targetPhase.chapterIds ?? [])];
+          arc.phases = arc.phases.filter((entry) => entry.id !== phaseId);
+          arc.chapterIds = flattenPhaseChapterIds(arc.phases);
+        }
+      } else {
+        phase.title = trimmedTitle;
+      }
       arc.updatedAt = new Date().toISOString();
       state.stories[arc.storyId].updatedAt = arc.updatedAt;
       saveLocalState(state);
-      return phase;
+      return arc.phases.find((entry) => entry.id === phaseId) ?? null;
     },
     async moveChapterToPhase(arcId, chapterId, phaseId) {
       const state = loadLocalState();
@@ -730,6 +788,7 @@ function storySummary(story) {
     pendingTransferStatus: story.pendingTransferStatus ?? "",
     arcIds: story.arcIds ?? [],
     tags: story.tags ?? [],
+    editorEmails: story.editorEmails ?? [],
     arcs: (story.arcIds ?? []).map((arcId) => ({ id: arcId })),
   };
 }
@@ -771,6 +830,8 @@ async function fetchStoryBundle(db, storyId) {
             ...item.data(),
             assets: item.data().assets ?? [],
             soundtracks: item.data().soundtracks ?? [],
+            renderMode: item.data().renderMode ?? "markdown",
+            htmlBackground: item.data().htmlBackground ?? "",
           })),
           arc.chapterIds ?? [],
         ),
@@ -898,6 +959,17 @@ function createFirebaseAdapter(authClient) {
         .map((item) => storySummary({ id: item.id, ...item.data() }))
         .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
     },
+    async listEditorStories(email) {
+      const emailLower = normalizeEmail(email);
+      if (!emailLower) {
+        return [];
+      }
+
+      const storySnapshots = await getDocs(query(collection(db, "stories"), where("editorEmails", "array-contains", emailLower)));
+      return storySnapshots.docs
+        .map((item) => storySummary({ id: item.id, ...item.data() }))
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    },
     async listBrowserStories() {
       const storySnapshots = await getDocs(query(collection(db, "stories"), where("visibility", "==", "public")));
       return storySnapshots.docs
@@ -928,6 +1000,8 @@ function createFirebaseAdapter(authClient) {
                 ...item.data(),
                 assets: item.data().assets ?? [],
                 soundtracks: item.data().soundtracks ?? [],
+                renderMode: item.data().renderMode ?? "markdown",
+                htmlBackground: item.data().htmlBackground ?? "",
               }))
               .filter((chapter) => (phase.chapterIds ?? []).includes(chapter.id)),
             phase.chapterIds ?? [],
@@ -939,6 +1013,8 @@ function createFirebaseAdapter(authClient) {
             ...item.data(),
             assets: item.data().assets ?? [],
             soundtracks: item.data().soundtracks ?? [],
+            renderMode: item.data().renderMode ?? "markdown",
+            htmlBackground: item.data().htmlBackground ?? "",
           })),
           arc.chapterIds ?? [],
         ),
@@ -952,6 +1028,8 @@ function createFirebaseAdapter(authClient) {
             ...chapter,
             assets: chapter.assets ?? [],
             soundtracks: chapter.soundtracks ?? [],
+            renderMode: chapter.renderMode ?? "markdown",
+            htmlBackground: chapter.htmlBackground ?? "",
           }
         : null;
     },
@@ -965,6 +1043,7 @@ function createFirebaseAdapter(authClient) {
         visibility,
         creatorId,
         creatorName,
+        editorEmails: [],
         arcIds: [],
         createdAt: now,
         updatedAt: now,
@@ -977,6 +1056,24 @@ function createFirebaseAdapter(authClient) {
     async updateStory(storyId, patch) {
       await updateDoc(doc(db, "stories", storyId), {
         ...patch,
+        updatedAt: new Date().toISOString(),
+      });
+      return fetchStoryBundle(db, storyId);
+    },
+    async addStoryEditor(storyId, email) {
+      const emailLower = normalizeEmail(email);
+      if (!emailLower) {
+        throw new Error("Enter a valid editor email.");
+      }
+
+      const story = await fetchStoryBundle(db, storyId);
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+
+      const editorEmails = [...new Set([...(story.editorEmails ?? []), emailLower])];
+      await updateDoc(doc(db, "stories", storyId), {
+        editorEmails,
         updatedAt: new Date().toISOString(),
       });
       return fetchStoryBundle(db, storyId);
@@ -1121,6 +1218,8 @@ function createFirebaseAdapter(authClient) {
         arcId,
         title,
         body: "",
+        renderMode: "markdown",
+        htmlBackground: "",
         assets: [],
         soundtracks: [],
         createdAt: now,
@@ -1219,14 +1318,38 @@ function createFirebaseAdapter(authClient) {
         throw new Error("Arc not found.");
       }
 
-      const phases = arc.phases.map((phase) =>
-        phase.id === phaseId
-          ? { ...phase, title: title?.trim() || DEFAULT_PHASE_TITLE }
-          : phase,
-      );
+      const phase = arc.phases.find((entry) => entry.id === phaseId);
+      if (!phase) {
+        throw new Error("Phase not found.");
+      }
+
+      const trimmedTitle = title?.trim() ?? "";
+      let phases;
+      if (!trimmedTitle) {
+        if (arc.phases.length <= 1) {
+          phases = arc.phases.map((entry) =>
+            entry.id === phaseId ? { ...entry, title: DEFAULT_PHASE_TITLE } : entry,
+          );
+        } else {
+          const phaseIndex = arc.phases.findIndex((entry) => entry.id === phaseId);
+          const targetIndex = phaseIndex < arc.phases.length - 1 ? phaseIndex + 1 : phaseIndex - 1;
+          phases = arc.phases
+            .map((entry, index) =>
+              index === targetIndex
+                ? { ...entry, chapterIds: [...(phase.chapterIds ?? []), ...(entry.chapterIds ?? [])] }
+                : entry,
+            )
+            .filter((entry) => entry.id !== phaseId);
+        }
+      } else {
+        phases = arc.phases.map((entry) =>
+          entry.id === phaseId ? { ...entry, title: trimmedTitle } : entry,
+        );
+      }
       const now = new Date().toISOString();
       await updateDoc(arcRef, {
         phases,
+        chapterIds: flattenPhaseChapterIds(phases),
         updatedAt: now,
       });
       await updateDoc(doc(db, "stories", arc.storyId), {

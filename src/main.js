@@ -141,6 +141,23 @@ function isOwner(story) {
   return Boolean(story?.creatorId && getUser()?.id && story.creatorId === getUser().id);
 }
 
+function normalizeEmail(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function isStoryEditor(story) {
+  const email = normalizeEmail(getUser()?.email);
+  return Boolean(email && (story?.editorEmails ?? []).includes(email));
+}
+
+function canEditStory(story) {
+  return isOwner(story) || isStoryEditor(story);
+}
+
+function canReadStory(story) {
+  return story?.visibility !== "private" || canEditStory(story);
+}
+
 function escapeHtml(value) {
   return value
     .replaceAll("&", "&amp;")
@@ -148,6 +165,169 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+const SAFE_HTML_TAGS = new Set([
+  "a",
+  "blockquote",
+  "br",
+  "code",
+  "em",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "img",
+  "li",
+  "ol",
+  "p",
+  "pre",
+  "s",
+  "span",
+  "strong",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "u",
+  "ul",
+]);
+
+const VOID_HTML_TAGS = new Set(["br", "hr", "img"]);
+const SAFE_STYLE_PROPERTIES = new Set([
+  "background-color",
+  "color",
+  "font-family",
+  "font-size",
+  "font-style",
+  "font-weight",
+  "line-height",
+  "text-align",
+  "text-decoration",
+]);
+
+function isSafeUrl(value, { image = false } = {}) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return false;
+  }
+
+  if (raw.startsWith("#") || raw.startsWith("/")) {
+    return true;
+  }
+
+  if (image && /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(raw)) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    return ["http:", "https:", "mailto:"].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeStyle(value) {
+  return String(value ?? "")
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [property, ...rest] = entry.split(":");
+      const name = property?.trim().toLowerCase();
+      const styleValue = rest.join(":").trim();
+
+      if (!SAFE_STYLE_PROPERTIES.has(name) || !styleValue) {
+        return "";
+      }
+
+      if (/url\s*\(|expression\s*\(|javascript:/i.test(styleValue)) {
+        return "";
+      }
+
+      return `${name}: ${styleValue.replace(/[<>"']/g, "")}`;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+function sanitizeHtmlAttributes(tagName, rawAttributes = "") {
+  const attrs = [];
+  const attrPattern = /([a-zA-Z:-]+)(?:\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>`]+)))?/g;
+  let match;
+
+  while ((match = attrPattern.exec(rawAttributes)) !== null) {
+    const name = match[1].toLowerCase();
+    const value = match[3] ?? match[4] ?? match[5] ?? "";
+
+    if (name.startsWith("on")) {
+      continue;
+    }
+
+    if (name === "style") {
+      const style = sanitizeStyle(value);
+      if (style) {
+        attrs.push(`style="${escapeHtml(style)}"`);
+      }
+      continue;
+    }
+
+    if (["title", "alt"].includes(name)) {
+      attrs.push(`${name}="${escapeHtml(value)}"`);
+      continue;
+    }
+
+    if (tagName === "a" && name === "href" && isSafeUrl(value)) {
+      attrs.push(`href="${escapeHtml(value)}"`);
+      continue;
+    }
+
+    if (tagName === "img" && name === "src" && isSafeUrl(value, { image: true })) {
+      attrs.push(`src="${escapeHtml(value)}"`);
+      continue;
+    }
+  }
+
+  if (tagName === "a" && attrs.some((attr) => attr.startsWith("href="))) {
+    attrs.push('target="_blank"', 'rel="noreferrer"');
+  }
+
+  return attrs.length ? ` ${attrs.join(" ")}` : "";
+}
+
+function protectSafeHtml(markdown) {
+  const tokens = [];
+  const source = String(markdown ?? "");
+  const protectedSource = source.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/g, (raw, tag, attrs) => {
+    const tagName = tag.toLowerCase();
+    if (!SAFE_HTML_TAGS.has(tagName)) {
+      return raw;
+    }
+
+    const isClosing = /^<\s*\//.test(raw);
+    if (isClosing) {
+      if (VOID_HTML_TAGS.has(tagName)) {
+        return "";
+      }
+      const token = `ULUNAVIR_SAFE_HTML_${tokens.length}`;
+      tokens.push(`</${tagName}>`);
+      return token;
+    }
+
+    const token = `ULUNAVIR_SAFE_HTML_${tokens.length}`;
+    const sanitizedAttrs = sanitizeHtmlAttributes(tagName, attrs);
+    const close = VOID_HTML_TAGS.has(tagName) ? " />" : ">";
+    tokens.push(`<${tagName}${sanitizedAttrs}${close}`);
+    return token;
+  });
+
+  return { protectedSource, tokens };
 }
 
 function makeClientId(prefix) {
@@ -598,12 +778,11 @@ function deactivateSoundtrackQueue() {
 }
 
 function renderMarkdown(markdown) {
-  const lineBreakToken = "ULUNAVIR_SAFE_LINE_BREAK";
-  const normalized = String(markdown ?? "")
-    .replace(/<br\s*\/?>/gi, lineBreakToken)
-    .replace(/&lt;br\s*\/?&gt;/gi, lineBreakToken)
-    .replace(/\n{3,}/g, (match) => `\n\n${`${lineBreakToken}\n`.repeat(match.length - 2)}\n`);
-  const escaped = escapeHtml(normalized).replaceAll(lineBreakToken, "<br />");
+  const source = String(markdown ?? "");
+  const extraBreakToken = "ULUNAVIR_SAFE_EXTRA_BREAK";
+  const normalized = source.replace(/\n{3,}/g, (match) => `\n\n${`${extraBreakToken}\n`.repeat(match.length - 2)}\n`);
+  let escaped = escapeHtml(normalized);
+  escaped = escaped.replaceAll(extraBreakToken, "<br />");
   const fenced = escaped.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
   const imageified = fenced.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<p><img alt="$1" src="$2" /></p>');
   const linked = imageified.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
@@ -620,20 +799,411 @@ function renderMarkdown(markdown) {
       .split("\n")
       .map((line) => line.replace(/^- /, "").trim())
       .map((item) => `<li>${item}</li>`)
-      .join("");
+    .join("");
     return `\n<ul>${items}</ul>`;
   });
 
   return listNormalized
     .split(/\n{2,}/)
     .map((block) => {
-      if (/^<(h\d|ul|pre|p)/.test(block.trim())) {
+      if (/^<(h\d|ul|ol|pre|p|blockquote|table|hr|br)/.test(block.trim())) {
         return block;
       }
 
       return `<p>${block.replace(/\n/g, "<br />")}</p>`;
     })
     .join("");
+}
+
+function renderHtmlDocument(html) {
+  return String(html ?? "")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, "")
+    .replace(/\n{3,}/g, (match) => `\n\n${"<br />\n".repeat(match.length - 2)}\n`);
+}
+
+function getChapterRenderMode(chapter) {
+  return chapter?.renderMode === "html" ? "html" : "markdown";
+}
+
+function getChapterHtmlBackground(chapter) {
+  return chapter?.htmlBackground || "";
+}
+
+function isLightColor(hex) {
+  const normalized = String(hex ?? "").replace("#", "");
+  if (!/^[0-9a-f]{6}$/i.test(normalized)) {
+    return false;
+  }
+
+  const red = parseInt(normalized.slice(0, 2), 16);
+  const green = parseInt(normalized.slice(2, 4), 16);
+  const blue = parseInt(normalized.slice(4, 6), 16);
+  return (red * 299 + green * 587 + blue * 114) / 1000 > 170;
+}
+
+function renderChapterBody(chapter, fallback) {
+  const mode = getChapterRenderMode(chapter);
+  const body = chapter?.body || fallback;
+
+  if (mode === "html") {
+    const background = getChapterHtmlBackground(chapter);
+    const styles = [];
+    if (background) {
+      styles.push(`background-color: ${background}`);
+      if (isLightColor(background)) {
+        styles.push("color: #1d1712");
+      }
+    }
+    return `<div class="html-document-surface" ${styles.length ? `style="${escapeHtml(styles.join("; "))}"` : ""}>${renderHtmlDocument(body)}</div>`;
+  }
+
+  return renderMarkdown(body);
+}
+
+function getWordImagePlaceholders(body = "") {
+  const ids = new Set();
+  const source = String(body ?? "");
+  [...source.matchAll(/data-word-image-placeholder=["'](\d+)["']/gi)].forEach((match) => ids.add(Number(match[1])));
+  [...source.matchAll(/\[IMAGE\s+(\d+)\s+HERE\]/gi)].forEach((match) => ids.add(Number(match[1])));
+  return [...ids].filter((id) => Number.isFinite(id)).sort((a, b) => a - b);
+}
+
+function renderWordImagePanel(chapter) {
+  const placeholders = getWordImagePlaceholders(chapter.body);
+  if (getChapterRenderMode(chapter) !== "html" || !placeholders.length) {
+    return "";
+  }
+
+  return `
+    <section class="panel stack word-image-panel">
+      <div class="section-header">
+        <div>
+          <h3>Word Images</h3>
+          <p class="muted">Paste Imgur or direct image URLs to replace the Word image placeholders in their original positions.</p>
+        </div>
+        <span class="pill">${placeholders.length} placeholder(s)</span>
+      </div>
+      <div class="word-image-list">
+        ${placeholders.map((id) => `
+          <div class="inline-form word-image-row">
+            <label>IMAGE ${id}</label>
+            <input data-word-image-url="${id}" placeholder="https://i.imgur.com/example.png" />
+            <button class="ghost-button" type="button" data-action="replace-word-image" data-chapter-id="${chapter.id}" data-image-index="${id}">Apply</button>
+          </div>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function convertImportedImageMarkers(html) {
+  return String(html ?? "").replace(/<img\b([^>]*?)>/gi, (raw, attrs) => {
+    const match = attrs.match(/\bsrc=(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const src = match?.[1] ?? match?.[2] ?? match?.[3] ?? "";
+    const imageMatch = src.match(/^#word-import-image-(\d+)$/);
+
+    if (!imageMatch) {
+      return raw;
+    }
+
+    const index = imageMatch[1];
+    return `<p><strong>[IMAGE ${index} HERE]</strong><br><span style="color: #c8b595;">Upload this Word image to Imgur, then replace this line with:</span><br><code>![word-image-${index}](PASTE_IMGUR_URL_HERE)</code></p>`;
+  });
+}
+
+function cleanupImportedWordHtml(html) {
+  return String(html ?? "")
+    // Word line numbering sometimes arrives as real text nodes: 123Text, 45Text, etc.
+    .replace(/([.!?:;])\s*\d{1,4}(?=[A-ZÇĞİÖŞÜ])/g, "$1 ")
+    .replace(/(<(?:p|h[1-6]|li|blockquote)\b[^>]*>)\s*[o0]\s*(?=[A-ZÇĞİÖŞÜ])/gi, "$1")
+    .replace(/(<(?:p|h[1-6]|li|blockquote)\b[^>]*>)\s*\d{1,4}\s*(?=[A-ZÇĞİÖŞÜ])/gi, "$1")
+    .replace(/<p>\s*(?:\d{1,4}|[o0])\s*<\/p>/gi, "")
+    .replace(/(?:^|\n)\s*(?:\d{1,4}|[o0])\s*(?=\n|$)/gi, "\n")
+    .replace(/>\s+</g, "><")
+    .replace(/<\/(h[1-6]|p|blockquote|ul|ol|li|table|tr)>\s*/gi, "</$1>\n\n")
+    .replace(/\s*<(h[1-6]|p|blockquote|ul|ol|table)\b/gi, "\n<$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function xmlChildren(node, localName) {
+  return [...(node?.childNodes ?? [])].filter((child) => child.nodeType === 1 && child.localName === localName);
+}
+
+function xmlFirst(node, localName) {
+  return xmlChildren(node, localName)[0] ?? null;
+}
+
+function xmlAttr(node, name) {
+  return node?.getAttribute(`w:${name}`) ?? node?.getAttribute(name) ?? "";
+}
+
+function wordColor(value) {
+  const color = String(value ?? "").trim();
+  if (!color || color.toLowerCase() === "auto") {
+    return "";
+  }
+
+  return color.startsWith("#") ? color : `#${color}`;
+}
+
+function wordHighlight(value) {
+  const colors = {
+    black: "#000000",
+    blue: "#2f65d9",
+    cyan: "#00cfe8",
+    green: "#37b24d",
+    magenta: "#d63384",
+    red: "#d9480f",
+    yellow: "#ffe066",
+    white: "#ffffff",
+  };
+
+  return colors[String(value ?? "").toLowerCase()] ?? "";
+}
+
+function getWordRunStyles(run) {
+  const runProperties = xmlFirst(run, "rPr");
+  if (!runProperties) {
+    return [];
+  }
+
+  const styles = [];
+  const color = wordColor(xmlAttr(xmlFirst(runProperties, "color"), "val"));
+  const highlight = wordHighlight(xmlAttr(xmlFirst(runProperties, "highlight"), "val"));
+  const size = Number(xmlAttr(xmlFirst(runProperties, "sz"), "val"));
+  const fonts = xmlFirst(runProperties, "rFonts");
+  const fontFamily = xmlAttr(fonts, "ascii") || xmlAttr(fonts, "hAnsi");
+  const underline = xmlFirst(runProperties, "u");
+  const verticalAlign = xmlAttr(xmlFirst(runProperties, "vertAlign"), "val");
+
+  if (xmlFirst(runProperties, "b")) {
+    styles.push("font-weight: 700");
+  }
+  if (xmlFirst(runProperties, "i")) {
+    styles.push("font-style: italic");
+  }
+  if (underline && xmlAttr(underline, "val") !== "none") {
+    styles.push("text-decoration: underline");
+  }
+  if (xmlFirst(runProperties, "strike")) {
+    styles.push("text-decoration: line-through");
+  }
+  if (color) {
+    styles.push(`color: ${color}`);
+  }
+  if (highlight) {
+    styles.push(`background-color: ${highlight}`);
+  }
+  if (Number.isFinite(size) && size > 0) {
+    styles.push(`font-size: ${size / 2}pt`);
+  }
+  if (fontFamily) {
+    styles.push(`font-family: ${fontFamily.replace(/[<>"']/g, "")}`);
+  }
+  if (verticalAlign === "superscript") {
+    styles.push("vertical-align: super", "font-size: 0.72em");
+  }
+  if (verticalAlign === "subscript") {
+    styles.push("vertical-align: sub", "font-size: 0.72em");
+  }
+
+  return styles;
+}
+
+function renderWordImagePlaceholder(index) {
+  return `<div class="word-image-placeholder" data-word-image-placeholder="${index}"><strong>[IMAGE ${index} HERE]</strong><br />Upload this Word image to Imgur, then replace this block with the Word Images panel.</div>`;
+}
+
+function renderWordRun(run, context) {
+  const chunks = [];
+
+  for (const child of [...run.childNodes]) {
+    if (child.nodeType !== 1) {
+      continue;
+    }
+
+    if (child.localName === "t" || child.localName === "instrText") {
+      chunks.push(escapeHtml(child.textContent ?? ""));
+    } else if (child.localName === "tab") {
+      chunks.push("&nbsp;&nbsp;&nbsp;&nbsp;");
+    } else if (child.localName === "br" || child.localName === "cr") {
+      chunks.push("<br />");
+    } else if (child.localName === "drawing" || child.localName === "pict") {
+      context.imageIndex += 1;
+      chunks.push(renderWordImagePlaceholder(context.imageIndex));
+    }
+  }
+
+  const content = chunks.join("");
+  if (!content) {
+    return "";
+  }
+
+  const styles = getWordRunStyles(run);
+  return styles.length ? `<span style="${escapeHtml(styles.join("; "))}">${content}</span>` : content;
+}
+
+function renderWordParagraph(paragraph, context) {
+  const paragraphProperties = xmlFirst(paragraph, "pPr");
+  const paragraphStyle = xmlAttr(xmlFirst(paragraphProperties, "pStyle"), "val").toLowerCase();
+  const alignment = xmlAttr(xmlFirst(paragraphProperties, "jc"), "val");
+  const styles = [];
+  let tag = "p";
+
+  const headingMatch = paragraphStyle.match(/heading([1-6])/);
+  if (headingMatch) {
+    tag = `h${headingMatch[1]}`;
+  } else if (paragraphStyle === "title") {
+    tag = "h1";
+  } else if (paragraphStyle === "subtitle") {
+    tag = "h2";
+  }
+
+  if (alignment) {
+    const normalized = alignment === "both" ? "justify" : alignment;
+    styles.push(`text-align: ${normalized}`);
+  }
+
+  const content = [...paragraph.childNodes].map((child) => {
+    if (child.nodeType !== 1) {
+      return "";
+    }
+
+    if (child.localName === "r") {
+      return renderWordRun(child, context);
+    }
+
+    if (child.localName === "hyperlink") {
+      return xmlChildren(child, "r").map((run) => renderWordRun(run, context)).join("");
+    }
+
+    return "";
+  }).join("").trim();
+
+  if (!content) {
+    return "";
+  }
+
+  return `<${tag}${styles.length ? ` style="${escapeHtml(styles.join("; "))}"` : ""}>${content}</${tag}>`;
+}
+
+function renderWordTable(table, context) {
+  const rows = xmlChildren(table, "tr").map((row) => {
+    const cells = xmlChildren(row, "tc").map((cell) => {
+      const content = xmlChildren(cell, "p").map((paragraph) => renderWordParagraph(paragraph, context)).filter(Boolean).join("");
+      return `<td>${content}</td>`;
+    }).join("");
+    return `<tr>${cells}</tr>`;
+  }).join("");
+
+  return rows ? `<table><tbody>${rows}</tbody></table>` : "";
+}
+
+async function convertDocxToRichHtml(arrayBuffer) {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(arrayBuffer);
+  const documentFile = zip.file("word/document.xml");
+  if (!documentFile) {
+    throw new Error("This .docx file does not contain a readable Word document.");
+  }
+
+  const xml = await documentFile.async("text");
+  const documentXml = new DOMParser().parseFromString(xml, "application/xml");
+  const body = documentXml.getElementsByTagNameNS("*", "body")[0];
+  const context = { imageIndex: 0 };
+  const html = [...(body?.childNodes ?? [])].map((child) => {
+    if (child.nodeType !== 1) {
+      return "";
+    }
+
+    if (child.localName === "p") {
+      return renderWordParagraph(child, context);
+    }
+
+    if (child.localName === "tbl") {
+      return renderWordTable(child, context);
+    }
+
+    return "";
+  }).filter(Boolean).join("\n\n");
+
+  return { html, imageCount: context.imageIndex };
+}
+
+function insertTextIntoTextarea(textarea, text) {
+  const start = textarea.selectionStart ?? textarea.value.length;
+  const end = textarea.selectionEnd ?? textarea.value.length;
+  const before = textarea.value.slice(0, start);
+  const after = textarea.value.slice(end);
+  const prefix = before && !before.endsWith("\n") ? "\n\n" : "";
+  const suffix = after && !text.endsWith("\n") ? "\n\n" : "";
+
+  textarea.value = `${before}${prefix}${text}${suffix}${after}`;
+  const cursor = before.length + prefix.length + text.length;
+  textarea.focus();
+  textarea.setSelectionRange(cursor, cursor);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function getEditorChapterDraft() {
+  const mode = document.querySelector("#chapter-render-mode-input")?.value === "html" ? "html" : "markdown";
+  const htmlBackground = document.querySelector("#chapter-html-background-input")?.value ?? "";
+  const body = document.querySelector("#chapter-body-input")?.value ?? "";
+  return {
+    body,
+    renderMode: mode,
+    htmlBackground: mode === "html" ? htmlBackground : "",
+  };
+}
+
+function updateChapterPreviewFromEditor() {
+  const preview = document.querySelector(".markdown-preview");
+  if (!preview) {
+    return;
+  }
+
+  const draft = getEditorChapterDraft();
+  preview.dataset.previewMode = draft.renderMode;
+  preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*");
+}
+
+async function importDocxIntoEditor(file) {
+  if (!file) {
+    return;
+  }
+
+  if (!file.name.toLowerCase().endsWith(".docx")) {
+    throw new Error("Please choose a .docx Word file.");
+  }
+
+  const bodyInput = document.querySelector("#chapter-body-input");
+  if (!(bodyInput instanceof HTMLTextAreaElement)) {
+    throw new Error("Chapter editor is not available.");
+  }
+  const chapterId = state.route.params.chapterId;
+  const titleInput = document.querySelector("#chapter-title-input");
+
+  const result = await convertDocxToRichHtml(await file.arrayBuffer());
+  const converted = cleanupImportedWordHtml(result.html);
+  if (!converted) {
+    throw new Error("No readable text was found in that Word file.");
+  }
+
+  await state.adapter.updateChapter(chapterId, {
+    title: titleInput?.value.trim() || "Untitled Chapter",
+    body: converted,
+    renderMode: "html",
+    htmlBackground: "",
+  });
+
+  const images = result.imageCount ? ` ${result.imageCount} image placeholder(s) added.` : "";
+  state.saveStatus = `Word file imported into the editor.${images}`;
+  const statusNode = document.querySelector(".notice.mono");
+  if (statusNode) {
+    statusNode.textContent = state.saveStatus;
+  }
+  await render();
 }
 
 function normalizeDateValue(value) {
@@ -871,8 +1441,24 @@ async function renderHome() {
 
 async function renderCreator() {
   const user = getUser();
-  const stories = await state.adapter.listCreatorStories(user?.id);
+  let stories = [];
+  let editorStories = [];
   let transfers = [];
+
+  try {
+    stories = await state.adapter.listCreatorStories(user?.id);
+  } catch (error) {
+    console.error("Creator story list failed:", error);
+    state.loadError = "Your stories could not be loaded right now.";
+  }
+
+  try {
+    editorStories = await state.adapter.listEditorStories?.(user?.email) ?? [];
+  } catch (error) {
+    console.error("Editor story list failed:", error);
+    state.loadError = "Editor permissions could not be loaded right now.";
+  }
+
   if (user?.email) {
     try {
       transfers = await state.adapter.listIncomingStoryTransfers?.(user.email) ?? [];
@@ -918,8 +1504,29 @@ async function renderCreator() {
             ${tags.map((entry) => `<a class="pill" href="#/creator?tag=${encodeURIComponent(entry)}">${escapeHtml(entry)}</a>`).join("")}
           </div>
         </section>
-        <section class="story-list">
-          ${filtered.length ? filtered.map(renderStoryCard).join("") : '<div class="empty-state">No stories match this filter yet.</div>'}
+        <section class="panel stack">
+          <div class="section-header">
+            <div>
+              <h3>Your Stories</h3>
+              <p class="muted">Stories where you are the author.</p>
+            </div>
+            <span class="pill">${filtered.length} story(s)</span>
+          </div>
+          <div class="story-list">
+            ${filtered.length ? filtered.map((story) => renderStoryCard(story, { authorView: true })).join("") : '<div class="empty-state">No stories match this filter yet.</div>'}
+          </div>
+        </section>
+        <section class="panel stack">
+          <div class="section-header">
+            <div>
+              <h3>Editor Permission</h3>
+              <p class="muted">Stories where the author has added you as an editor.</p>
+            </div>
+            <span class="pill">${editorStories.length} story(s)</span>
+          </div>
+          <div class="story-list">
+            ${editorStories.length ? editorStories.map((story) => renderStoryCard(story, { editorView: true })).join("") : '<div class="empty-state">No editor permissions yet.</div>'}
+          </div>
         </section>
       </div>
     `,
@@ -927,12 +1534,13 @@ async function renderCreator() {
   );
 }
 
-function renderStoryCard(story) {
+function renderStoryCard(story, options = {}) {
   return `
     <article class="list-card">
       <div class="split-header">
         <div>
           <h3>${escapeHtml(story.title)}</h3>
+          ${options.editorView ? `<p class="muted">by ${escapeHtml(story.creatorName)}</p>` : ""}
           <p class="muted">Updated ${formatDate(story.updatedAt)}</p>
         </div>
         <span class="status-pill">${escapeHtml(story.visibility)}</span>
@@ -943,7 +1551,7 @@ function renderStoryCard(story) {
       <div class="card-actions">
         <a class="primary-button" href="#/stories/${story.id}">Open story</a>
         <span class="pill">${story.arcs.length} arc(s)</span>
-        <button class="danger-button" data-action="delete-story" data-story-id="${story.id}">Delete</button>
+        ${options.authorView ? `<button class="danger-button" data-action="delete-story" data-story-id="${story.id}">Delete</button>` : ""}
       </div>
     </article>
   `;
@@ -1037,11 +1645,12 @@ async function renderStoryPage(storyId) {
   }
 
   const owner = isOwner(story);
+  const editable = canEditStory(story);
   const browserView = getRouteQuery().get("view") === "browser";
   const structureView = getStructureView();
   const transferPanelOpen = getRouteQuery().get("transfer") === "1";
   const pendingTransfer = story.pendingTransferStatus === "pending" ? story.pendingTransfer : null;
-  if (story.visibility === "private" && !owner) {
+  if (!canReadStory(story)) {
     return renderMissing("This story is private.");
   }
 
@@ -1062,23 +1671,25 @@ async function renderStoryPage(storyId) {
               <button class="ghost-button ${structureView === "grid" ? "is-active" : ""}" data-action="set-structure-view" data-view="grid">Compact Grid</button>
               <button class="ghost-button ${structureView === "list" ? "is-active" : ""}" data-action="set-structure-view" data-view="list">List</button>
             </div>
-            ${browserView && owner ? '<a class="ghost-button" href="#/stories/' + story.id + '">Edit</a>' : ""}
+            ${browserView && editable ? '<a class="ghost-button" href="#/stories/' + story.id + '">Edit</a>' : ""}
+            ${owner && !browserView ? '<button class="ghost-button" type="button" data-action="add-story-editor" data-story-id="' + story.id + '">Add an Editor</button>' : ""}
             ${owner && !browserView ? '<button class="ghost-button" type="button" data-action="open-story-transfer" data-story-id="' + story.id + '">Transfer Ownership</button>' : ""}
-            ${owner && !browserView ? '<button class="primary-button" data-action="create-arc" data-story-id="' + story.id + '">New arc</button>' : ""}
+            ${editable && !browserView ? '<button class="primary-button" data-action="create-arc" data-story-id="' + story.id + '">New arc</button>' : ""}
           </div>
         </div>
         <section class="panel stack">
           <div class="inline-form">
-            <input id="story-title-input" value="${escapeHtml(story.title)}" ${owner ? "" : "disabled"} />
-            <input id="story-tags-input" value="${escapeHtml(story.tags.join(", "))}" ${owner ? "" : "disabled"} />
-            <select id="story-visibility-input" ${owner ? "" : "disabled"}>
+            <input id="story-title-input" value="${escapeHtml(story.title)}" ${editable ? "" : "disabled"} />
+            <input id="story-tags-input" value="${escapeHtml(story.tags.join(", "))}" ${editable ? "" : "disabled"} />
+            <select id="story-visibility-input" ${editable ? "" : "disabled"}>
               ${["public", "unlisted", "private"].map((value) => `<option value="${value}" ${story.visibility === value ? "selected" : ""}>${value}</option>`).join("")}
             </select>
-            ${owner ? '<button class="ghost-button" data-action="save-story-settings" data-story-id="' + story.id + '">Save</button>' : ""}
+            ${editable ? '<button class="ghost-button" data-action="save-story-settings" data-story-id="' + story.id + '">Save</button>' : ""}
           </div>
           <div class="notice">
             <strong>${escapeHtml(story.creatorName)}</strong>
             <div class="muted">Created ${formatDate(story.createdAt)}. Visibility is currently ${escapeHtml(story.visibility)}.</div>
+            ${story.editorEmails?.length ? `<div class="muted">Editors: ${escapeHtml(story.editorEmails.join(", "))}</div>` : ""}
           </div>
           ${owner && pendingTransfer ? `
             <div class="notice">
@@ -1108,11 +1719,11 @@ async function renderStoryPage(storyId) {
           ` : ""}
         </section>
         <section class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
-          ${story.arcs.length ? story.arcs.map((arc, index) => renderArcCard(arc, story, owner, index, browserView)).join("") : '<div class="empty-state">No arcs yet. Create the first arc to start structuring this story.</div>'}
+          ${story.arcs.length ? story.arcs.map((arc, index) => renderArcCard(arc, story, editable, index, browserView)).join("") : '<div class="empty-state">No arcs yet. Create the first arc to start structuring this story.</div>'}
         </section>
       </div>
     `,
-    browserView ? "browser" : owner ? "creator" : "browser",
+    browserView ? "browser" : editable ? "creator" : "browser",
   );
 }
 
@@ -1238,20 +1849,20 @@ async function renderArcPage(storyId, arcId) {
     return renderMissing("Arc not found.");
   }
 
-  const owner = isOwner(story);
+  const editable = canEditStory(story);
   const browserView = getRouteQuery().get("view") === "browser";
   const structureView = getStructureView();
-  if (story.visibility === "private" && !owner) {
+  if (!canReadStory(story)) {
     return renderMissing("This story is private.");
   }
 
   const phaseSections = (arc.phases ?? []).map((phase) => `
     <section class="phase-block stack">
-      ${renderPhaseHeader(phase, owner, browserView, arc.id)}
+      ${renderPhaseHeader(phase, editable, browserView, arc.id)}
       <div class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
         ${
           phase.chapters.length
-            ? phase.chapters.map((chapter, index) => renderChapterCard(chapter, story, arc, owner, index, browserView, phase)).join("")
+            ? phase.chapters.map((chapter, index) => renderChapterCard(chapter, story, arc, editable, index, browserView, phase)).join("")
             : '<div class="empty-state">No chapters in this phase yet.</div>'
         }
       </div>
@@ -1262,7 +1873,7 @@ async function renderArcPage(storyId, arcId) {
     `
       <div class="stack">
         ${breadcrumbs([
-          [browserView ? "#/browser" : owner ? "#/creator" : "#/browser", browserView ? "Browser" : owner ? "Creator" : "Browser"],
+          [browserView ? "#/browser" : editable ? "#/creator" : "#/browser", browserView ? "Browser" : editable ? "Creator" : "Browser"],
           ["#/stories/" + story.id + (browserView ? "?view=browser" : ""), story.title],
           ["", arc.title],
         ])}
@@ -1276,12 +1887,12 @@ async function renderArcPage(storyId, arcId) {
               <button class="ghost-button ${structureView === "grid" ? "is-active" : ""}" data-action="set-structure-view" data-view="grid">Compact Grid</button>
               <button class="ghost-button ${structureView === "list" ? "is-active" : ""}" data-action="set-structure-view" data-view="list">List</button>
             </div>
-            ${browserView && owner ? '<a class="ghost-button" href="#/stories/' + story.id + '/arcs/' + arc.id + '">Edit</a>' : ""}
-            ${owner && !browserView ? '<button class="ghost-button" data-action="create-phase" data-arc-id="' + arc.id + '">New phase</button>' : ""}
-            ${owner && !browserView ? '<button class="primary-button" data-action="create-chapter" data-arc-id="' + arc.id + '" data-story-id="' + story.id + '">New chapter</button>' : ""}
+            ${browserView && editable ? '<a class="ghost-button" href="#/stories/' + story.id + '/arcs/' + arc.id + '">Edit</a>' : ""}
+            ${editable && !browserView ? '<button class="ghost-button" data-action="create-phase" data-arc-id="' + arc.id + '">New phase</button>' : ""}
+            ${editable && !browserView ? '<button class="primary-button" data-action="create-chapter" data-arc-id="' + arc.id + '" data-story-id="' + story.id + '">New chapter</button>' : ""}
           </div>
         </div>
-        ${owner && !browserView ? `
+        ${editable && !browserView ? `
           <section class="panel">
             <div class="inline-form">
               <input id="arc-title-input" value="${escapeHtml(arc.title)}" />
@@ -1291,10 +1902,10 @@ async function renderArcPage(storyId, arcId) {
         ${phaseSections || '<div class="empty-state">No chapters yet. Add one to begin writing.</div>'}
       </div>
     `,
-    browserView ? "browser" : owner ? "creator" : "browser",
+    browserView ? "browser" : editable ? "creator" : "browser",
   );
 
-  if (owner && !browserView) {
+  if (editable && !browserView) {
     const transferButton = document.querySelector("#story-transfer-button");
     if (transferButton) {
       transferButton.addEventListener("click", (event) => {
@@ -1360,27 +1971,46 @@ async function renderChapterPage(storyId, arcId, chapterId) {
     return renderMissing("Chapter not found.");
   }
 
-  const owner = isOwner(story);
+  const editable = canEditStory(story);
   const browserView = getRouteQuery().get("view") === "browser";
-  if (story.visibility === "private" && !owner) {
+  if (!canReadStory(story)) {
     return renderMissing("This story is private.");
   }
   const assets = chapter.assets ?? [];
+  const renderMode = getChapterRenderMode(chapter);
+  const htmlBackground = getChapterHtmlBackground(chapter);
   const soundtrackQueue = browserView ? buildSoundtrackQueue(chapter.soundtracks ?? []) : [];
   const chapterIndex = (arc.chapters ?? []).findIndex((entry) => entry.id === chapterId);
   const previousChapter = chapterIndex > 0 ? arc.chapters[chapterIndex - 1] : null;
   const nextChapter = chapterIndex >= 0 && chapterIndex < arc.chapters.length - 1 ? arc.chapters[chapterIndex + 1] : null;
   const chapterPagerTop = renderChapterPager(story.id, arc.id, previousChapter, nextChapter, browserView);
   const chapterPagerBottom = renderChapterPager(story.id, arc.id, previousChapter, nextChapter, browserView);
-  const editorContent = owner && !browserView
+  const editorContent = editable && !browserView
     ? `
         <div class="editor-shell">
           <section class="editor-pane">
             <div class="editor-controls">
-              <input id="chapter-title-input" value="${escapeHtml(chapter.title)}" ${owner ? "" : "disabled"} />
-              <textarea id="chapter-body-input" class="markdown-area" ${owner ? "" : "disabled"}>${escapeHtml(chapter.body)}</textarea>
+              <div class="editor-import-bar">
+                <div class="card-actions">
+                  <button class="ghost-button" type="button" data-action="open-docx-import">Import .docx</button>
+                  ${renderMode === "html" ? '<button class="ghost-button" type="button" data-action="switch-markdown-mode">Markdown Mode</button>' : ""}
+                </div>
+                <span class="muted">${renderMode === "html" ? "HTML mode: Word content is locked. Switch to Markdown Mode to clear it and write normally." : "Markdown mode: import a Word file to switch this chapter to locked HTML mode."}</span>
+                ${renderMode === "html" ? `
+                  <label class="html-background-control">
+                    <span>Background</span>
+                    <input id="chapter-html-background-input" type="color" value="${escapeHtml(htmlBackground || "#120f0d")}" data-action="set-html-background" />
+                    <button class="small-button" type="button" data-action="clear-html-background" title="Use site background">×</button>
+                  </label>
+                ` : ""}
+                <input id="chapter-render-mode-input" type="hidden" value="${renderMode}" />
+                <input id="docx-import-input" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
+              </div>
+              <input id="chapter-title-input" value="${escapeHtml(chapter.title)}" ${editable ? "" : "disabled"} />
+              <textarea id="chapter-body-input" class="markdown-area" ${editable && renderMode !== "html" ? "" : "disabled"}>${escapeHtml(chapter.body)}</textarea>
               ${chapterPagerBottom}
-              ${owner ? `
+              ${renderWordImagePanel(chapter)}
+              ${editable ? `
                 <div class="panel asset-helper">
                   <div class="section-header">
                     <h3>Image link helper</h3>
@@ -1405,7 +2035,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
           </section>
           <section class="preview-pane">
             <h3>Preview</h3>
-            <div class="markdown-preview">${renderMarkdown(chapter.body || "*Start writing to preview your chapter here.*")}</div>
+            <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*")}</div>
           </section>
         </div>
       `
@@ -1415,7 +2045,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
             <h3>Reading view</h3>
             <span class="pill">${assets.length} asset(s)</span>
           </div>
-          <div class="markdown-preview">${renderMarkdown(chapter.body || "*This chapter is empty.*")}</div>
+          <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*This chapter is empty.*")}</div>
         </section>
         ${chapterPagerBottom}
         ${assets.length ? `<section class="panel stack"><h3>Referenced images</h3><div class="asset-list">${assets.map((asset, index) => renderAssetItem(asset, index)).join("")}</div></section>` : ""}
@@ -1425,7 +2055,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
     `
       <div class="stack">
         ${breadcrumbs([
-          [browserView ? "#/browser" : owner ? "#/creator" : "#/browser", browserView ? "Browser" : owner ? "Creator" : "Browser"],
+          [browserView ? "#/browser" : editable ? "#/creator" : "#/browser", browserView ? "Browser" : editable ? "Creator" : "Browser"],
           ["#/stories/" + story.id + (browserView ? "?view=browser" : ""), story.title],
           ["#/stories/" + story.id + "/arcs/" + arc.id + (browserView ? "?view=browser" : ""), arc.title],
           ["", chapter.title || "Untitled chapter"],
@@ -1433,18 +2063,18 @@ async function renderChapterPage(storyId, arcId, chapterId) {
         <div class="page-title">
           <div>
             <h2>${escapeHtml(chapter.title || "Untitled chapter")}</h2>
-            <p class="muted">${owner && !browserView ? "Write in markdown, add image links, and save your draft." : "Read this chapter in a clean, read-only view."}</p>
+            <p class="muted">${editable && !browserView ? "Write in markdown, add image links, and save your draft." : "Read this chapter in a clean, read-only view."}</p>
           </div>
           <div class="card-actions">
-            ${browserView && owner ? `<a class="ghost-button" href="#/stories/${story.id}/arcs/${arc.id}/chapters/${chapter.id}">Edit</a>` : ""}
-            ${owner && !browserView ? `<button class="primary-button" data-action="save-chapter" data-chapter-id="${chapter.id}">Save</button>` : ""}
+            ${browserView && editable ? `<a class="ghost-button" href="#/stories/${story.id}/arcs/${arc.id}/chapters/${chapter.id}">Edit</a>` : ""}
+            ${editable && !browserView ? `<button class="primary-button" data-action="save-chapter" data-chapter-id="${chapter.id}">Save</button>` : ""}
           </div>
         </div>
         ${chapterPagerTop}
         ${editorContent}
       </div>
     `,
-    browserView ? "browser" : owner ? "creator" : "browser",
+    browserView ? "browser" : editable ? "creator" : "browser",
     renderChapterQuickTools(soundtrackQueue),
   );
 
@@ -1921,6 +2551,42 @@ async function deleteChapterAsset(chapterId, assetIndex) {
   await render();
 }
 
+function replaceWordImagePlaceholder(body, imageIndex, imageUrl) {
+  const imageHtml = `<img src="${escapeHtml(imageUrl)}" alt="word-image-${imageIndex}" />`;
+  const source = String(body ?? "");
+  const modernPattern = new RegExp(`<div\\b(?=[^>]*data-word-image-placeholder=["']${imageIndex}["'])[^>]*>[\\s\\S]*?<\\/div>`, "i");
+  if (modernPattern.test(source)) {
+    return source.replace(modernPattern, imageHtml);
+  }
+
+  const legacyPattern = new RegExp(`<[^>]+>[^<]*\\[IMAGE\\s+${imageIndex}\\s+HERE\\][\\s\\S]*?<\\/[^>]+>`, "i");
+  if (legacyPattern.test(source)) {
+    return source.replace(legacyPattern, imageHtml);
+  }
+
+  return source.replace(new RegExp(`\\[IMAGE\\s+${imageIndex}\\s+HERE\\]`, "i"), imageHtml);
+}
+
+async function applyWordImageReplacement(chapterId, imageIndex) {
+  const chapter = await state.adapter.getChapter(chapterId);
+  if (!chapter) {
+    throw new Error("Chapter not found.");
+  }
+
+  const input = document.querySelector(`[data-word-image-url="${imageIndex}"]`);
+  const url = normalizeExternalImageUrl(input?.value ?? "");
+  const nextBody = replaceWordImagePlaceholder(chapter.body ?? "", imageIndex, url);
+
+  await state.adapter.updateChapter(chapterId, {
+    body: nextBody,
+    renderMode: "html",
+    htmlBackground: getEditorChapterDraft().htmlBackground,
+  });
+
+  state.saveStatus = `IMAGE ${imageIndex} replaced.`;
+  await render();
+}
+
 async function syncUserProfile() {
   const user = getUser();
   if (!user?.id) {
@@ -2029,6 +2695,27 @@ document.addEventListener("click", async (event) => {
     const values = readStoryFormValues();
     await state.adapter.updateStory(storyId, values);
     state.saveStatus = "Story details saved.";
+    return render();
+  }
+
+  if (action === "add-story-editor") {
+    const email = window.prompt("Editor Gmail address");
+    if (email === null) {
+      return;
+    }
+    if (!email.trim()) {
+      state.saveStatus = "Enter an editor email first.";
+      return render();
+    }
+    const userEmail = normalizeEmail(getUser()?.email);
+    const editorEmail = normalizeEmail(email);
+    if (userEmail && userEmail === editorEmail) {
+      state.saveStatus = "You are already the author of this story.";
+      return render();
+    }
+
+    await state.adapter.addStoryEditor(actionTarget.dataset.storyId, email);
+    state.saveStatus = `Editor added: ${editorEmail}`;
     return render();
   }
 
@@ -2181,8 +2868,15 @@ document.addEventListener("click", async (event) => {
     if (title === null) {
       return;
     }
+    const arcBeforeRename = await state.adapter.getArc(actionTarget.dataset.arcId);
     await state.adapter.renamePhase(actionTarget.dataset.arcId, actionTarget.dataset.phaseId, title);
-    state.saveStatus = "Phase renamed.";
+    if (!title.trim()) {
+      state.saveStatus = (arcBeforeRename?.phases?.length ?? 0) <= 1
+        ? "Only phase restored to Chapters."
+        : "Phase deleted. Its chapters were moved into the next phase.";
+    } else {
+      state.saveStatus = "Phase renamed.";
+    }
     return render();
   }
 
@@ -2209,12 +2903,51 @@ document.addEventListener("click", async (event) => {
 
   if (action === "save-chapter") {
     const chapterId = actionTarget.dataset.chapterId;
+    const draft = getEditorChapterDraft();
     await state.adapter.updateChapter(chapterId, {
       title: document.querySelector("#chapter-title-input").value.trim() || "Untitled Chapter",
-      body: document.querySelector("#chapter-body-input").value,
+      body: draft.body,
+      renderMode: draft.renderMode,
+      htmlBackground: draft.htmlBackground,
     });
     state.saveStatus = "Chapter saved.";
     return render();
+  }
+
+  if (action === "open-docx-import") {
+    document.querySelector("#docx-import-input")?.click();
+    return;
+  }
+
+  if (action === "switch-markdown-mode") {
+    if (!window.confirm("Switch to Markdown Mode? This will clear the imported Word HTML from this chapter.")) {
+      return;
+    }
+    await state.adapter.updateChapter(state.route.params.chapterId, {
+      body: "",
+      renderMode: "markdown",
+      htmlBackground: "",
+    });
+    state.saveStatus = "Switched to Markdown Mode. Imported Word HTML was cleared.";
+    return render();
+  }
+
+  if (action === "clear-html-background") {
+    const input = document.querySelector("#chapter-html-background-input");
+    if (input) {
+      input.value = "#120f0d";
+    }
+    const modeInput = document.querySelector("#chapter-render-mode-input");
+    if (modeInput) {
+      modeInput.value = "html";
+    }
+    updateChapterPreviewFromEditor();
+    state.saveStatus = "HTML background reset to the site background. Click Save to keep this.";
+    const statusNode = document.querySelector(".notice.mono");
+    if (statusNode) {
+      statusNode.textContent = state.saveStatus;
+    }
+    return;
   }
 
   if (action === "save-pen-name") {
@@ -2297,6 +3030,19 @@ document.addEventListener("click", async (event) => {
     }
   }
 
+  if (action === "replace-word-image") {
+    try {
+      return await applyWordImageReplacement(actionTarget.dataset.chapterId, Number(actionTarget.dataset.imageIndex));
+    } catch (error) {
+      state.saveStatus = String(error.message || error);
+      const statusNode = document.querySelector(".notice.mono");
+      if (statusNode) {
+        statusNode.textContent = state.saveStatus;
+      }
+      return;
+    }
+  }
+
   if (action === "toggle-soundtrack") {
     if (!getActiveSoundtrack()) {
       return;
@@ -2323,6 +3069,30 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("change", async (event) => {
   const target = event.target;
+  if (target instanceof HTMLInputElement && target.id === "docx-import-input") {
+    const file = target.files?.[0];
+    target.value = "";
+    if (!file) {
+      return;
+    }
+
+    state.saveStatus = "Importing Word file...";
+    const statusNode = document.querySelector(".notice.mono");
+    if (statusNode) {
+      statusNode.textContent = state.saveStatus;
+    }
+
+    try {
+      await importDocxIntoEditor(file);
+    } catch (error) {
+      state.saveStatus = `Word import failed: ${String(error.message || error)}`;
+      if (statusNode) {
+        statusNode.textContent = state.saveStatus;
+      }
+    }
+    return;
+  }
+
   if (!(target instanceof HTMLSelectElement)) {
     return;
   }
@@ -2340,11 +3110,13 @@ document.addEventListener("input", (event) => {
     return;
   }
 
+  if (event.target instanceof HTMLInputElement && event.target.dataset.action === "set-html-background") {
+    updateChapterPreviewFromEditor();
+    return;
+  }
+
   if (event.target.id === "chapter-body-input") {
-    const preview = document.querySelector(".markdown-preview");
-    if (preview) {
-      preview.innerHTML = renderMarkdown(event.target.value || "*Start writing to preview your chapter here.*");
-    }
+    updateChapterPreviewFromEditor();
   }
 
   if (event.target.id === "chapter-title-input") {

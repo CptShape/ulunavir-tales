@@ -17,46 +17,33 @@ service cloud.firestore {
       return signedIn() && storyDoc(storyId).data.creatorId == request.auth.uid;
     }
 
+    function editsStoryById(storyId) {
+      return signedIn()
+        && request.auth.token.email != null
+        && storyDoc(storyId).data.editorEmails is list
+        && request.auth.token.email in storyDoc(storyId).data.editorEmails;
+    }
+
     function storyIsSharedById(storyId) {
       return storyDoc(storyId).data.visibility == "public"
         || storyDoc(storyId).data.visibility == "unlisted";
     }
 
     function canReadStoryById(storyId) {
-      return storyIsSharedById(storyId) || ownsStoryById(storyId);
-    }
-
-    function canReadArcById(arcId) {
-      return canReadStoryById(arcDoc(arcId).data.storyId);
+      return storyIsSharedById(storyId) || ownsStoryById(storyId) || editsStoryById(storyId);
     }
 
     function canEditStoryById(storyId) {
       return signedIn()
         && (
           storyDoc(storyId).data.creatorId == request.auth.uid
+          || editsStoryById(storyId)
           || (
             request.auth.token.email != null
             && storyDoc(storyId).data.pendingTransferStatus == "pending"
-            && storyDoc(storyId).data.pendingTransfer.targetEmail == request.auth.token.email
+            && storyDoc(storyId).data.pendingTransferEmailLower == request.auth.token.email
           )
         );
-    }
-
-    function ownsArcById(arcId) {
-      return signedIn()
-        && ownsStoryById(arcDoc(arcId).data.storyId);
-    }
-
-    function canEditArcById(arcId) {
-      return signedIn()
-        && canEditStoryById(arcDoc(arcId).data.storyId);
-    }
-
-    function isTransferRecipient() {
-      return signedIn()
-        && request.auth.token.email != null
-        && resource.data.pendingTransferStatus == "pending"
-        && resource.data.pendingTransfer.targetEmail == request.auth.token.email;
     }
 
     match /users/{userId} {
@@ -64,22 +51,24 @@ service cloud.firestore {
     }
 
     match /stories/{storyId} {
-      allow read: if canReadStoryById(storyId);
+      allow read: if signedIn()
+        || resource.data.visibility == "public"
+        || resource.data.visibility == "unlisted";
       allow create: if signedIn() && request.resource.data.creatorId == request.auth.uid;
       allow update: if canEditStoryById(storyId);
       allow delete: if ownsStoryById(storyId);
     }
 
     match /arcs/{arcId} {
-      allow read: if canReadArcById(arcId);
+      allow read: if canReadStoryById(resource.data.storyId);
       allow create: if signedIn() && canEditStoryById(request.resource.data.storyId);
-      allow update, delete: if canEditArcById(arcId);
+      allow update, delete: if canEditStoryById(resource.data.storyId);
     }
 
     match /chapters/{chapterId} {
-      allow read: if canReadArcById(resource.data.arcId);
-      allow create: if signedIn() && canEditArcById(request.resource.data.arcId);
-      allow update, delete: if canEditArcById(resource.data.arcId);
+      allow read: if canReadStoryById(arcDoc(resource.data.arcId).data.storyId);
+      allow create: if signedIn() && canEditStoryById(arcDoc(request.resource.data.arcId).data.storyId);
+      allow update, delete: if canEditStoryById(arcDoc(resource.data.arcId).data.storyId);
     }
   }
 }
