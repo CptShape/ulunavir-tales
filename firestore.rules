@@ -68,7 +68,13 @@ service cloud.firestore {
     match /chapters/{chapterId} {
       allow read: if canReadStoryById(arcDoc(resource.data.arcId).data.storyId);
       allow create: if signedIn() && canEditStoryById(arcDoc(request.resource.data.arcId).data.storyId);
-      allow update, delete: if canEditStoryById(arcDoc(resource.data.arcId).data.storyId);
+      allow update: if canEditStoryById(arcDoc(resource.data.arcId).data.storyId)
+        || (
+          signedIn()
+          && canReadStoryById(arcDoc(resource.data.arcId).data.storyId)
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly(["comments", "reactions", "updatedAt"])
+        );
+      allow delete: if canEditStoryById(arcDoc(resource.data.arcId).data.storyId);
     }
   }
 }

@@ -85,6 +85,10 @@ const starterState = {
       arcId: demoArcId,
       title: "Lanterns on the Pier",
       body: "# Opening scene\n\nA storm hangs over the harbor while the first lanterns come alive.",
+      published: true,
+      dmNotes: "",
+      comments: [],
+      reactions: {},
       renderMode: "markdown",
       htmlBackground: "",
       assets: [],
@@ -112,6 +116,21 @@ function buildDefaultPhase(chapterIds = []) {
     id: makeId("phase"),
     title: DEFAULT_PHASE_TITLE,
     chapterIds: [...chapterIds],
+  };
+}
+
+function normalizeChapter(chapter) {
+  return {
+    ...chapter,
+    body: chapter.body ?? "",
+    published: chapter.published ?? true,
+    dmNotes: chapter.dmNotes ?? "",
+    comments: chapter.comments ?? [],
+    reactions: chapter.reactions ?? {},
+    assets: chapter.assets ?? [],
+    soundtracks: chapter.soundtracks ?? [],
+    renderMode: chapter.renderMode ?? "markdown",
+    htmlBackground: chapter.htmlBackground ?? "",
   };
 }
 
@@ -188,7 +207,8 @@ function normalizeArc(arc, state) {
   const preparedArc = ensureArcPhasesData(arc);
   const chapters = preparedArc.chapterIds
     .map((chapterId) => state.chapters[chapterId])
-    .filter(Boolean);
+    .filter(Boolean)
+    .map(normalizeChapter);
 
   return {
     ...preparedArc,
@@ -196,7 +216,7 @@ function normalizeArc(arc, state) {
     chapters,
     phases: preparedArc.phases.map((phase) => ({
       ...phase,
-      chapters: phase.chapterIds.map((chapterId) => state.chapters[chapterId]).filter(Boolean),
+        chapters: phase.chapterIds.map((chapterId) => state.chapters[chapterId]).filter(Boolean).map(normalizeChapter),
     })),
   };
 }
@@ -329,15 +349,7 @@ function createLocalAdapter() {
     async getChapter(chapterId) {
       const state = loadLocalState();
       const chapter = state.chapters[chapterId] ?? null;
-      return chapter
-        ? {
-            ...chapter,
-            renderMode: chapter.renderMode ?? "markdown",
-            htmlBackground: chapter.htmlBackground ?? "",
-            assets: chapter.assets ?? [],
-            soundtracks: chapter.soundtracks ?? [],
-          }
-        : null;
+      return chapter ? normalizeChapter(chapter) : null;
     },
     async createStory({ creatorId, creatorName, title, tags, visibility }) {
       const state = loadLocalState();
@@ -538,6 +550,10 @@ function createLocalAdapter() {
         arcId,
         title,
         body: "",
+        published: false,
+        dmNotes: "",
+        comments: [],
+        reactions: {},
         renderMode: "markdown",
         htmlBackground: "",
         assets: [],
@@ -549,11 +565,11 @@ function createLocalAdapter() {
       if (!arc.phases?.length) {
         arc.phases = [buildDefaultPhase()];
       }
-      arc.phases[0].chapterIds.push(id);
+      arc.phases[arc.phases.length - 1].chapterIds.push(id);
       arc.updatedAt = now;
       state.stories[arc.storyId].updatedAt = now;
       saveLocalState(state);
-      return state.chapters[id];
+      return normalizeChapter(state.chapters[id]);
     },
     async updateChapter(chapterId, patch) {
       const state = loadLocalState();
@@ -575,6 +591,20 @@ function createLocalAdapter() {
 
       saveLocalState(state);
       return state.chapters[chapterId];
+    },
+    async updateChapterEngagement(chapterId, patch) {
+      const state = loadLocalState();
+      if (!state.chapters[chapterId]) {
+        throw new Error("Chapter not found.");
+      }
+
+      state.chapters[chapterId] = {
+        ...state.chapters[chapterId],
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      };
+      saveLocalState(state);
+      return normalizeChapter(state.chapters[chapterId]);
     },
     async updateChapterOrder(arcId, chapterIds) {
       const state = loadLocalState();
@@ -825,14 +855,7 @@ async function fetchStoryBundle(db, storyId) {
       return [
         arc.id,
         sortByIdOrder(
-          chapterSnapshots.docs.map((item) => ({
-            id: item.id,
-            ...item.data(),
-            assets: item.data().assets ?? [],
-            soundtracks: item.data().soundtracks ?? [],
-            renderMode: item.data().renderMode ?? "markdown",
-            htmlBackground: item.data().htmlBackground ?? "",
-          })),
+          chapterSnapshots.docs.map((item) => normalizeChapter({ id: item.id, ...item.data() })),
           arc.chapterIds ?? [],
         ),
       ];
@@ -995,27 +1018,13 @@ function createFirebaseAdapter(authClient) {
           ...phase,
           chapters: sortByIdOrder(
             chapterSnapshots.docs
-              .map((item) => ({
-                id: item.id,
-                ...item.data(),
-                assets: item.data().assets ?? [],
-                soundtracks: item.data().soundtracks ?? [],
-                renderMode: item.data().renderMode ?? "markdown",
-                htmlBackground: item.data().htmlBackground ?? "",
-              }))
+              .map((item) => normalizeChapter({ id: item.id, ...item.data() }))
               .filter((chapter) => (phase.chapterIds ?? []).includes(chapter.id)),
             phase.chapterIds ?? [],
           ),
         })),
         chapters: sortByIdOrder(
-          chapterSnapshots.docs.map((item) => ({
-            id: item.id,
-            ...item.data(),
-            assets: item.data().assets ?? [],
-            soundtracks: item.data().soundtracks ?? [],
-            renderMode: item.data().renderMode ?? "markdown",
-            htmlBackground: item.data().htmlBackground ?? "",
-          })),
+          chapterSnapshots.docs.map((item) => normalizeChapter({ id: item.id, ...item.data() })),
           arc.chapterIds ?? [],
         ),
       };
@@ -1023,15 +1032,7 @@ function createFirebaseAdapter(authClient) {
     async getChapter(chapterId) {
       const chapterSnapshot = await getDoc(doc(db, "chapters", chapterId));
       const chapter = applyDocId(chapterSnapshot);
-      return chapter
-        ? {
-            ...chapter,
-            assets: chapter.assets ?? [],
-            soundtracks: chapter.soundtracks ?? [],
-            renderMode: chapter.renderMode ?? "markdown",
-            htmlBackground: chapter.htmlBackground ?? "",
-          }
-        : null;
+      return chapter ? normalizeChapter(chapter) : null;
     },
     async createStory({ creatorId, creatorName, title, tags, visibility }) {
       const id = makeId("story");
@@ -1218,6 +1219,10 @@ function createFirebaseAdapter(authClient) {
         arcId,
         title,
         body: "",
+        published: false,
+        dmNotes: "",
+        comments: [],
+        reactions: {},
         renderMode: "markdown",
         htmlBackground: "",
         assets: [],
@@ -1231,7 +1236,7 @@ function createFirebaseAdapter(authClient) {
       if (!preparedArc.phases.length) {
         preparedArc.phases = [buildDefaultPhase()];
       }
-      preparedArc.phases[0].chapterIds.push(id);
+      preparedArc.phases[preparedArc.phases.length - 1].chapterIds.push(id);
       await updateDoc(arcRef, {
         chapterIds: [...(arc.chapterIds ?? []), id],
         phases: preparedArc.phases,
@@ -1265,6 +1270,14 @@ function createFirebaseAdapter(authClient) {
         }
       }
 
+      return this.getChapter(chapterId);
+    },
+    async updateChapterEngagement(chapterId, patch) {
+      const chapterRef = doc(db, "chapters", chapterId);
+      await updateDoc(chapterRef, {
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      });
       return this.getChapter(chapterId);
     },
     async updateChapterOrder(arcId, chapterIds) {

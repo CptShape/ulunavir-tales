@@ -28,6 +28,8 @@ const state = {
     manualPause: false,
     recoveryTimer: null,
     recoveryAttempts: 0,
+    cueObserver: null,
+    cueMode: false,
   },
 };
 
@@ -57,6 +59,23 @@ function getDisplayName(user = getUser()) {
 
 function getStructureView(user = getUser()) {
   return user?.structureView === "grid" ? "grid" : "list";
+}
+
+function getReaderSettings(user = getUser()) {
+  const settings = user?.readerSettings ?? {};
+  return {
+    fontSize: Math.max(14, Math.min(24, Number(settings.fontSize) || 17)),
+    lineHeight: Math.max(1.4, Math.min(2.4, Number(settings.lineHeight) || 1.85)),
+    width: Math.max(620, Math.min(1200, Number(settings.width) || 920)),
+  };
+}
+
+function isChapterPublished(chapter) {
+  return chapter?.published !== false;
+}
+
+function canReadChapter(chapter, editable) {
+  return editable || isChapterPublished(chapter);
 }
 
 function persistSession(user) {
@@ -387,6 +406,21 @@ function buildSoundtrackQueue(soundtracks = []) {
   return soundtracks.map(parseSoundtrackEntry).filter(Boolean);
 }
 
+function buildSoundtrackLabelMap(soundtracks = []) {
+  return new Map(buildSoundtrackQueue(soundtracks).map((track) => [track.id, track.label]));
+}
+
+function hasMarkdownMusicMarkers(chapter) {
+  return getChapterRenderMode(chapter) === "markdown" && /\[music:\s*[^\]]+\]/i.test(chapter?.body ?? "");
+}
+
+function clearSoundtrackCueObserver() {
+  if (state.soundtrack.cueObserver) {
+    state.soundtrack.cueObserver.disconnect();
+    state.soundtrack.cueObserver = null;
+  }
+}
+
 function getSoundtrackLayer() {
   let layer = document.querySelector("#soundtrack-layer");
   if (layer) {
@@ -582,6 +616,53 @@ function advanceSoundtrack() {
   syncSoundtrackPlayback();
 }
 
+function loopCurrentSoundtrack() {
+  const active = getActiveSoundtrack();
+  if (!active || state.soundtrack.manualPause) {
+    return;
+  }
+
+  clearSoundtrackRecovery();
+  state.soundtrack.paused = false;
+  state.soundtrack.recoveryAttempts = 0;
+
+  try {
+    if (state.soundtrack.youtubePlayer?.seekTo) {
+      state.soundtrack.youtubePlayer.seekTo(0, true);
+      state.soundtrack.youtubePlayer.playVideo();
+    } else if (state.soundtrack.youtubePlayer?.loadVideoById && active.videoId) {
+      state.soundtrack.youtubePlayer.loadVideoById(active.videoId);
+    }
+    setSoundtrackStatus(`Looping cue: ${active.label}`);
+    requestSoundtrackRecovery("Cue loop did not restart", 5000);
+  } catch (error) {
+    setSoundtrackStatus(`Cue loop failed: ${String(error.message || error)}`);
+  }
+}
+
+function playSoundtrackById(trackId) {
+  const index = state.soundtrack.queue.findIndex((track) => track.id === trackId);
+  if (index < 0) {
+    setSoundtrackStatus("Music cue points to a missing soundtrack.");
+    return;
+  }
+
+  const current = getActiveSoundtrack();
+  if (current?.id === trackId && !state.soundtrack.paused) {
+    return;
+  }
+
+  state.soundtrack.currentIndex = index;
+  state.soundtrack.paused = false;
+  state.soundtrack.manualPause = false;
+  state.soundtrack.ready = false;
+  state.soundtrack.activeKey = "";
+  state.soundtrack.recoveryAttempts = 0;
+  clearSoundtrackRecovery();
+  persistSoundtrackUi();
+  syncSoundtrackPlayback();
+}
+
 function clampVolume(value) {
   return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
 }
@@ -631,6 +712,10 @@ async function ensureYouTubePlayer(track, token) {
               if (event.data === window.YT.PlayerState.ENDED) {
                 clearSoundtrackRecovery();
                 state.soundtrack.recoveryAttempts = 0;
+                if (state.soundtrack.cueMode) {
+                  loopCurrentSoundtrack();
+                  return;
+                }
                 advanceSoundtrack();
                 return;
               }
@@ -734,12 +819,14 @@ async function syncSoundtrackPlayback() {
   }
 }
 
-function activateSoundtrackQueue(arcId, queue) {
+function activateSoundtrackQueue(arcId, queue, options = {}) {
   const stored = loadStoredSoundtrackState();
   const queueChanged = arcId !== state.soundtrack.arcId || JSON.stringify(queue.map((entry) => entry.id)) !== JSON.stringify((state.soundtrack.queue ?? []).map((entry) => entry.id));
 
+  clearSoundtrackCueObserver();
   state.soundtrack.arcId = arcId;
   state.soundtrack.queue = queue;
+  state.soundtrack.cueMode = Boolean(options.waitForCue);
 
   if (queueChanged) {
     state.soundtrack.currentIndex =
@@ -756,11 +843,55 @@ function activateSoundtrackQueue(arcId, queue) {
   }
 
   persistSoundtrackUi();
+  if (state.soundtrack.cueMode) {
+    state.soundtrack.paused = true;
+    state.soundtrack.manualPause = true;
+    if (state.soundtrack.youtubePlayer?.pauseVideo) {
+      state.soundtrack.youtubePlayer.pauseVideo();
+    }
+    saveStoredSoundtrackState();
+    setSoundtrackStatus("Waiting for music cue.");
+    updateQuickToolButton();
+    observeSoundtrackCues();
+    return;
+  }
+
   syncSoundtrackPlayback();
+}
+
+function observeSoundtrackCues() {
+  const cues = [...document.querySelectorAll("[data-music-trigger]")];
+  if (!cues.length || !state.soundtrack.queue.length) {
+    return;
+  }
+
+  const queueIds = new Set(state.soundtrack.queue.map((track) => track.id));
+  state.soundtrack.cueObserver = new IntersectionObserver(
+    (entries) => {
+      const visibleCue = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+
+      const trackId = visibleCue?.target?.dataset?.musicTrigger;
+      if (!trackId || !queueIds.has(trackId)) {
+        return;
+      }
+
+      playSoundtrackById(trackId);
+    },
+    {
+      root: null,
+      rootMargin: "-20% 0px -55% 0px",
+      threshold: [0, 0.35, 0.75],
+    },
+  );
+
+  cues.forEach((cue) => state.soundtrack.cueObserver.observe(cue));
 }
 
 function deactivateSoundtrackQueue() {
   clearSoundtrackRecovery();
+  clearSoundtrackCueObserver();
   state.soundtrack.arcId = "";
   state.soundtrack.queue = [];
   state.soundtrack.currentIndex = 0;
@@ -770,6 +901,7 @@ function deactivateSoundtrackQueue() {
   state.soundtrack.activeKey = "";
   state.soundtrack.ready = false;
   state.soundtrack.recoveryAttempts = 0;
+  state.soundtrack.cueMode = false;
   if (state.soundtrack.youtubePlayer?.pauseVideo) {
     state.soundtrack.youtubePlayer.pauseVideo();
   }
@@ -777,8 +909,20 @@ function deactivateSoundtrackQueue() {
   saveStoredSoundtrackState();
 }
 
-function renderMarkdown(markdown) {
+function renderMusicCue(trackId, soundtrackLabels, showMusicCues) {
+  const cleanId = String(trackId ?? "").trim();
+  if (!cleanId) {
+    return "";
+  }
+
+  const label = soundtrackLabels.get(cleanId) ?? cleanId;
+  return `<span class="music-cue ${showMusicCues ? "is-visible" : ""}" data-music-trigger="${escapeHtml(cleanId)}">${showMusicCues ? `Music cue: ${escapeHtml(label)}` : ""}</span>`;
+}
+
+function renderMarkdown(markdown, options = {}) {
   const source = String(markdown ?? "");
+  const soundtrackLabels = options.soundtrackLabels ?? new Map();
+  const showMusicCues = Boolean(options.showMusicCues);
   const extraBreakToken = "ULUNAVIR_SAFE_EXTRA_BREAK";
   const normalized = source.replace(/\n{3,}/g, (match) => `\n\n${`${extraBreakToken}\n`.repeat(match.length - 2)}\n`);
   let escaped = escapeHtml(normalized);
@@ -788,7 +932,8 @@ function renderMarkdown(markdown) {
   const linked = imageified.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   const bolded = linked.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   const italicized = bolded.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  const headings = italicized
+  const musicMarked = italicized.replace(/\[music:\s*([^\]]+)\]/gi, (_, trackId) => renderMusicCue(trackId, soundtrackLabels, showMusicCues));
+  const headings = musicMarked
     .replace(/^### (.*)$/gm, "<h3>$1</h3>")
     .replace(/^## (.*)$/gm, "<h2>$1</h2>")
     .replace(/^# (.*)$/gm, "<h1>$1</h1>");
@@ -841,7 +986,7 @@ function isLightColor(hex) {
   return (red * 299 + green * 587 + blue * 114) / 1000 > 170;
 }
 
-function renderChapterBody(chapter, fallback) {
+function renderChapterBody(chapter, fallback, options = {}) {
   const mode = getChapterRenderMode(chapter);
   const body = chapter?.body || fallback;
 
@@ -857,7 +1002,10 @@ function renderChapterBody(chapter, fallback) {
     return `<div class="html-document-surface" ${styles.length ? `style="${escapeHtml(styles.join("; "))}"` : ""}>${renderHtmlDocument(body)}</div>`;
   }
 
-  return renderMarkdown(body);
+  return renderMarkdown(body, {
+    soundtrackLabels: buildSoundtrackLabelMap(chapter?.soundtracks ?? []),
+    showMusicCues: Boolean(options.showMusicCues),
+  });
 }
 
 function getWordImagePlaceholders(body = "") {
@@ -1165,7 +1313,7 @@ function updateChapterPreviewFromEditor() {
 
   const draft = getEditorChapterDraft();
   preview.dataset.previewMode = draft.renderMode;
-  preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*");
+  preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*", { showMusicCues: true });
 }
 
 async function importDocxIntoEditor(file) {
@@ -1235,6 +1383,25 @@ function formatDate(value) {
   }).format(date);
 }
 
+function sanitizeFileName(value, fallback = "Untitled") {
+  return String(value ?? fallback)
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "-")
+    .replace(/\s+/g, " ")
+    .slice(0, 90) || fallback;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function byQuery(items, query, accessor) {
   if (!query) {
     return items;
@@ -1263,6 +1430,8 @@ function renderQuickTools(content = "") {
 
 function layout(content, activeTab, quickToolsContent = "") {
   const user = getUser();
+  const readerSettings = getReaderSettings(user);
+  const readerStyle = `--reader-font-size:${readerSettings.fontSize}px;--reader-line-height:${readerSettings.lineHeight};--reader-width:${readerSettings.width}px;`;
   const authNotice = state.authError
     ? `<div class="notice"><strong>Sign-in error</strong><div class="muted">${escapeHtml(state.authError)}</div></div>`
     : "";
@@ -1274,7 +1443,7 @@ function layout(content, activeTab, quickToolsContent = "") {
     : "";
 
   appRoot.innerHTML = `
-    <div class="app-shell">
+    <div class="app-shell" style="${readerStyle}">
       <aside class="sidebar">
         <div>
           <div class="brand">
@@ -1316,6 +1485,7 @@ async function renderSettings() {
   if (!user) {
     return renderMissing("Sign in to manage account settings.");
   }
+  const readerSettings = getReaderSettings(user);
 
   layout(
     `
@@ -1338,6 +1508,44 @@ async function renderSettings() {
           <div class="muted">
             Leave it empty to fall back to your account name.
           </div>
+        </section>
+        <section class="panel stack">
+          <div class="section-header">
+            <div>
+              <h3>Reader Settings</h3>
+              <p class="muted">Tune the reading view for long chapters.</p>
+            </div>
+          </div>
+          <div class="inline-form settings-form">
+            <label>
+              <span class="muted">Font size</span>
+              <input id="reader-font-size-input" type="number" min="14" max="24" value="${readerSettings.fontSize}" />
+            </label>
+            <label>
+              <span class="muted">Line height</span>
+              <input id="reader-line-height-input" type="number" min="1.4" max="2.4" step="0.05" value="${readerSettings.lineHeight}" />
+            </label>
+            <label>
+              <span class="muted">Page width</span>
+              <input id="reader-width-input" type="number" min="620" max="1200" step="20" value="${readerSettings.width}" />
+            </label>
+            <button class="ghost-button" data-action="save-reader-settings">Save reader settings</button>
+          </div>
+          <article
+            id="reader-settings-preview"
+            class="reader-settings-preview markdown-preview"
+            style="--reader-font-size:${readerSettings.fontSize}px;--reader-line-height:${readerSettings.lineHeight};--reader-width:${readerSettings.width}px;"
+          >
+            <h3>The Candlelit Archive</h3>
+            <p>
+              Rain tapped against the stained glass while the old librarian unfolded a map
+              that smelled of dust, sea salt, and dragon smoke.
+            </p>
+            <p>
+              This sample updates live so you can feel the font size, line height, and page
+              width before saving your reader settings.
+            </p>
+          </article>
         </section>
       </div>
     `,
@@ -1672,6 +1880,7 @@ async function renderStoryPage(storyId) {
               <button class="ghost-button ${structureView === "list" ? "is-active" : ""}" data-action="set-structure-view" data-view="list">List</button>
             </div>
             ${browserView && editable ? '<a class="ghost-button" href="#/stories/' + story.id + '">Edit</a>' : ""}
+            ${editable && !browserView ? '<button class="ghost-button" data-action="export-story" data-story-id="' + story.id + '">Export</button>' : ""}
             ${owner && !browserView ? '<button class="ghost-button" type="button" data-action="add-story-editor" data-story-id="' + story.id + '">Add an Editor</button>' : ""}
             ${owner && !browserView ? '<button class="ghost-button" type="button" data-action="open-story-transfer" data-story-id="' + story.id + '">Transfer Ownership</button>' : ""}
             ${editable && !browserView ? '<button class="primary-button" data-action="create-arc" data-story-id="' + story.id + '">New arc</button>' : ""}
@@ -1765,6 +1974,7 @@ function renderPhaseHeader(phase, owner, browserView = false, arcId = "") {
 
 function renderSoundtrackPanel(chapter) {
   const soundtracks = chapter.soundtracks ?? [];
+  const markdownMode = getChapterRenderMode(chapter) === "markdown";
   return `
     <section class="panel stack soundtrack-panel">
       <div class="section-header">
@@ -1786,14 +1996,57 @@ function renderSoundtrackPanel(chapter) {
                 <article class="soundtrack-item">
                   <div>
                     <strong>${escapeHtml(track.label?.trim() || "Untitled soundtrack")}</strong>
+                    ${markdownMode ? `<div class="muted mono">[music: ${escapeHtml(track.id)}]</div>` : ""}
                     <div class="muted mono">${escapeHtml(track.url ?? "")}</div>
                   </div>
-                  <button class="danger-button" data-action="delete-soundtrack" data-chapter-id="${chapter.id}" data-soundtrack-id="${track.id}">Remove</button>
+                  <div class="card-actions">
+                    ${markdownMode ? `<button class="small-button" data-action="copy-soundtrack-marker" data-soundtrack-id="${track.id}">Copy cue</button>` : ""}
+                    <button class="danger-button" data-action="delete-soundtrack" data-chapter-id="${chapter.id}" data-soundtrack-id="${track.id}">Remove</button>
+                  </div>
                 </article>
               `).join("")
             : '<div class="empty-state">No soundtrack links yet.</div>'
         }
       </div>
+    </section>
+  `;
+}
+
+function renderChapterEngagementPanel(chapter, editable = false) {
+  const user = getUser();
+  const reactions = chapter.reactions ?? {};
+  const emojis = ["🔥", "😮", "💀", "❤️"];
+  const comments = chapter.comments ?? [];
+  return `
+    <section class="panel stack engagement-panel">
+      <div class="section-header">
+        <div>
+          <h3>Comments / Reactions</h3>
+          <p class="muted">Leave table chatter without changing the chapter text.</p>
+        </div>
+      </div>
+      <div class="reaction-row">
+        ${emojis.map((emoji) => {
+          const users = reactions[emoji] ?? [];
+          const active = user?.id && users.includes(user.id);
+          return `<button class="ghost-button ${active ? "is-active" : ""}" data-action="toggle-reaction" data-chapter-id="${chapter.id}" data-emoji="${emoji}" ${user ? "" : "disabled"}>${emoji} ${users.length}</button>`;
+        }).join("")}
+      </div>
+      <div class="comment-list">
+        ${comments.length ? comments.map((comment) => `
+          <article class="notice">
+            <strong>${escapeHtml(comment.userName ?? "Reader")}</strong>
+            <div class="muted">${formatDate(comment.createdAt)}</div>
+            <p>${escapeHtml(comment.body ?? "")}</p>
+          </article>
+        `).join("") : '<div class="empty-state">No comments yet.</div>'}
+      </div>
+      ${user ? `
+        <div class="inline-form">
+          <input id="chapter-comment-input" placeholder="Write a comment..." />
+          <button class="ghost-button" data-action="add-comment" data-chapter-id="${chapter.id}">Add comment</button>
+        </div>
+      ` : '<div class="muted">Sign in to react or comment.</div>'}
     </section>
   `;
 }
@@ -1856,18 +2109,24 @@ async function renderArcPage(storyId, arcId) {
     return renderMissing("This story is private.");
   }
 
-  const phaseSections = (arc.phases ?? []).map((phase) => `
-    <section class="phase-block stack">
-      ${renderPhaseHeader(phase, editable, browserView, arc.id)}
-      <div class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
-        ${
-          phase.chapters.length
-            ? phase.chapters.map((chapter, index) => renderChapterCard(chapter, story, arc, editable, index, browserView, phase)).join("")
-            : '<div class="empty-state">No chapters in this phase yet.</div>'
-        }
-      </div>
-    </section>
-  `).join("");
+  const phaseSections = (arc.phases ?? []).map((phase) => {
+    const visibleChapters = (phase.chapters ?? []).filter((chapter) => canReadChapter(chapter, editable, browserView));
+    if (browserView && !visibleChapters.length) {
+      return "";
+    }
+    return `
+      <section class="phase-block stack">
+        ${renderPhaseHeader(phase, editable, browserView, arc.id)}
+        <div class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
+          ${
+            visibleChapters.length
+              ? visibleChapters.map((chapter, index) => renderChapterCard(chapter, story, arc, editable, index, browserView, phase)).join("")
+              : '<div class="empty-state">No chapters in this phase yet.</div>'
+          }
+        </div>
+      </section>
+    `;
+  }).join("");
 
   layout(
     `
@@ -1923,7 +2182,7 @@ function renderChapterCard(chapter, story, arc, owner, index, browserView = fals
       <div class="split-header">
         <div>
           <h3>${escapeHtml(chapter.title || "Untitled chapter")}</h3>
-          <p class="muted">Updated ${formatDate(chapter.updatedAt)}</p>
+          <p class="muted">Updated ${formatDate(chapter.updatedAt)}${!isChapterPublished(chapter) ? " · Draft" : ""}</p>
         </div>
         ${owner && !browserView ? `
           <div class="order-buttons">
@@ -1976,13 +2235,17 @@ async function renderChapterPage(storyId, arcId, chapterId) {
   if (!canReadStory(story)) {
     return renderMissing("This story is private.");
   }
+  if (!canReadChapter(chapter, editable, browserView)) {
+    return renderMissing("This chapter is still a draft.");
+  }
   const assets = chapter.assets ?? [];
   const renderMode = getChapterRenderMode(chapter);
   const htmlBackground = getChapterHtmlBackground(chapter);
   const soundtrackQueue = browserView ? buildSoundtrackQueue(chapter.soundtracks ?? []) : [];
-  const chapterIndex = (arc.chapters ?? []).findIndex((entry) => entry.id === chapterId);
-  const previousChapter = chapterIndex > 0 ? arc.chapters[chapterIndex - 1] : null;
-  const nextChapter = chapterIndex >= 0 && chapterIndex < arc.chapters.length - 1 ? arc.chapters[chapterIndex + 1] : null;
+  const readableChapters = (arc.chapters ?? []).filter((entry) => canReadChapter(entry, editable, browserView));
+  const chapterIndex = readableChapters.findIndex((entry) => entry.id === chapterId);
+  const previousChapter = chapterIndex > 0 ? readableChapters[chapterIndex - 1] : null;
+  const nextChapter = chapterIndex >= 0 && chapterIndex < readableChapters.length - 1 ? readableChapters[chapterIndex + 1] : null;
   const chapterPagerTop = renderChapterPager(story.id, arc.id, previousChapter, nextChapter, browserView);
   const chapterPagerBottom = renderChapterPager(story.id, arc.id, previousChapter, nextChapter, browserView);
   const editorContent = editable && !browserView
@@ -2007,7 +2270,23 @@ async function renderChapterPage(storyId, arcId, chapterId) {
                 <input id="docx-import-input" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
               </div>
               <input id="chapter-title-input" value="${escapeHtml(chapter.title)}" ${editable ? "" : "disabled"} />
+              <div class="inline-form">
+                <label class="toggle-row">
+                  <input id="chapter-published-input" type="checkbox" ${isChapterPublished(chapter) ? "checked" : ""} />
+                  <span>Published for readers</span>
+                </label>
+                <span class="pill">${isChapterPublished(chapter) ? "Published" : "Draft"}</span>
+              </div>
               <textarea id="chapter-body-input" class="markdown-area" ${editable && renderMode !== "html" ? "" : "disabled"}>${escapeHtml(chapter.body)}</textarea>
+              <section class="panel stack dm-notes-panel">
+                <div class="section-header">
+                  <div>
+                    <h3>Chapter / DM Notes</h3>
+                    <p class="muted">Private notes for authors and editors. Readers never see this.</p>
+                  </div>
+                </div>
+                <textarea id="chapter-dm-notes-input" class="markdown-area notes-area" placeholder="Secret prep, reminders, NPC motives...">${escapeHtml(chapter.dmNotes ?? "")}</textarea>
+              </section>
               ${chapterPagerBottom}
               ${renderWordImagePanel(chapter)}
               ${editable ? `
@@ -2035,7 +2314,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
           </section>
           <section class="preview-pane">
             <h3>Preview</h3>
-            <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*")}</div>
+            <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*", { showMusicCues: true })}</div>
           </section>
         </div>
       `
@@ -2049,6 +2328,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
         </section>
         ${chapterPagerBottom}
         ${assets.length ? `<section class="panel stack"><h3>Referenced images</h3><div class="asset-list">${assets.map((asset, index) => renderAssetItem(asset, index)).join("")}</div></section>` : ""}
+        ${renderChapterEngagementPanel(chapter, editable)}
       `;
 
   layout(
@@ -2067,6 +2347,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
           </div>
           <div class="card-actions">
             ${browserView && editable ? `<a class="ghost-button" href="#/stories/${story.id}/arcs/${arc.id}/chapters/${chapter.id}">Edit</a>` : ""}
+            ${editable && !browserView ? `<a class="ghost-button" href="#/stories/${story.id}/arcs/${arc.id}/chapters/${chapter.id}?view=browser">Full Preview</a>` : ""}
             ${editable && !browserView ? `<button class="primary-button" data-action="save-chapter" data-chapter-id="${chapter.id}">Save</button>` : ""}
           </div>
         </div>
@@ -2079,7 +2360,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
   );
 
   if (browserView && soundtrackQueue.length) {
-    activateSoundtrackQueue(chapter.id, soundtrackQueue);
+    activateSoundtrackQueue(chapter.id, soundtrackQueue, { waitForCue: hasMarkdownMusicMarkers(chapter) });
   } else {
     deactivateSoundtrackQueue();
   }
@@ -2508,6 +2789,56 @@ async function addExternalAsset(chapterId) {
   await render();
 }
 
+function renderExportChapterHtml(story, arc, phase, chapter) {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(chapter.title || "Untitled Chapter")}</title>
+  <style>
+    body { margin: 0; padding: 48px; background: #120f0d; color: #eadfc8; font-family: Georgia, serif; line-height: 1.85; }
+    main { max-width: 900px; margin: 0 auto; }
+    h1, h2, h3 { color: #d3a24d; }
+    img { max-width: 100%; border-radius: 12px; }
+    .meta { color: #b8a88e; margin-bottom: 28px; }
+    .draft { display: inline-block; padding: 4px 9px; border: 1px solid #8f6230; border-radius: 999px; color: #e2bd7a; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="meta">${escapeHtml(story.title)} / ${escapeHtml(arc.title)} / ${escapeHtml(phase.title)} ${isChapterPublished(chapter) ? "" : '<span class="draft">Draft</span>'}</div>
+    <h1>${escapeHtml(chapter.title || "Untitled Chapter")}</h1>
+    ${renderChapterBody(chapter, "")}
+  </main>
+</body>
+</html>`;
+}
+
+async function exportStoryArchive(storyId) {
+  const story = await state.adapter.getStory(storyId);
+  if (!story) {
+    throw new Error("Story not found.");
+  }
+
+  const { default: JSZip } = await import("jszip");
+  const zip = new JSZip();
+  const storyFolder = zip.folder(sanitizeFileName(story.title, "Story"));
+
+  story.arcs.forEach((arc, arcIndex) => {
+    const arcFolder = storyFolder.folder(`${String(arcIndex + 1).padStart(2, "0")} - ${sanitizeFileName(arc.title, "Arc")}`);
+    (arc.phases ?? []).forEach((phase, phaseIndex) => {
+      const phaseFolder = arcFolder.folder(`${String(phaseIndex + 1).padStart(2, "0")} - ${sanitizeFileName(phase.title, "Phase")}`);
+      (phase.chapters ?? []).forEach((chapter, chapterIndex) => {
+        const fileName = `${String(chapterIndex + 1).padStart(2, "0")} - ${sanitizeFileName(chapter.title, "Chapter")}.html`;
+        phaseFolder.file(fileName, renderExportChapterHtml(story, arc, phase, chapter));
+      });
+    });
+  });
+
+  const blob = await zip.generateAsync({ type: "blob" });
+  downloadBlob(blob, `${sanitizeFileName(story.title, "story-export")}.zip`);
+}
+
 async function copyTextToClipboard(text) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -2601,6 +2932,7 @@ async function syncUserProfile() {
       email: profile.email ?? user.email,
       penName: profile.penName ?? "",
       structureView: profile.structureView ?? user.structureView ?? "list",
+      readerSettings: profile.readerSettings ?? user.readerSettings ?? getReaderSettings(user),
     });
   }
 }
@@ -2651,6 +2983,7 @@ document.addEventListener("click", async (event) => {
       email: user.email,
       penName: user.penName ?? "",
       structureView,
+      readerSettings: user.readerSettings ?? getReaderSettings(user),
     });
     persistSession({
       ...user,
@@ -2658,6 +2991,7 @@ document.addEventListener("click", async (event) => {
       penName: profile.penName ?? user.penName ?? "",
       name: profile.name ?? user.name,
       email: profile.email ?? user.email,
+      readerSettings: profile.readerSettings ?? user.readerSettings ?? getReaderSettings(user),
     });
     return render();
   }
@@ -2716,6 +3050,21 @@ document.addEventListener("click", async (event) => {
 
     await state.adapter.addStoryEditor(actionTarget.dataset.storyId, email);
     state.saveStatus = `Editor added: ${editorEmail}`;
+    return render();
+  }
+
+  if (action === "export-story") {
+    try {
+      state.saveStatus = "Preparing story export...";
+      const statusNode = document.querySelector(".notice .muted");
+      if (statusNode) {
+        statusNode.textContent = state.saveStatus;
+      }
+      await exportStoryArchive(actionTarget.dataset.storyId);
+      state.saveStatus = "Story export downloaded.";
+    } catch (error) {
+      state.saveStatus = `Export failed: ${String(error.message || error)}`;
+    }
     return render();
   }
 
@@ -2831,6 +3180,21 @@ document.addEventListener("click", async (event) => {
     return render();
   }
 
+  if (action === "copy-soundtrack-marker") {
+    const marker = `[music: ${actionTarget.dataset.soundtrackId}]`;
+    try {
+      await copyTextToClipboard(marker);
+      state.saveStatus = `Copied music cue: ${marker}`;
+    } catch (error) {
+      state.saveStatus = `Copy failed. Use this cue manually: ${marker}`;
+    }
+    const statusNode = document.querySelector(".notice.mono");
+    if (statusNode) {
+      statusNode.textContent = state.saveStatus;
+    }
+    return;
+  }
+
   if (action === "delete-soundtrack") {
     const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
     await state.adapter.updateChapter(chapter.id, {
@@ -2907,6 +3271,8 @@ document.addEventListener("click", async (event) => {
     await state.adapter.updateChapter(chapterId, {
       title: document.querySelector("#chapter-title-input").value.trim() || "Untitled Chapter",
       body: draft.body,
+      published: document.querySelector("#chapter-published-input")?.checked ?? false,
+      dmNotes: document.querySelector("#chapter-dm-notes-input")?.value ?? "",
       renderMode: draft.renderMode,
       htmlBackground: draft.htmlBackground,
     });
@@ -2957,14 +3323,87 @@ document.addEventListener("click", async (event) => {
       name: user.name,
       email: user.email,
       penName,
+      structureView: user.structureView ?? "list",
+      readerSettings: user.readerSettings ?? getReaderSettings(user),
     });
     persistSession({
       ...user,
       penName: profile.penName ?? "",
       name: profile.name ?? user.name,
       email: profile.email ?? user.email,
+      structureView: profile.structureView ?? user.structureView ?? "list",
+      readerSettings: profile.readerSettings ?? user.readerSettings ?? getReaderSettings(user),
     });
     state.saveStatus = penName ? "Pen name saved." : "Pen name cleared. Account name will be used.";
+    return render();
+  }
+
+  if (action === "save-reader-settings") {
+    const user = getUser();
+    const readerSettings = {
+      fontSize: Number(document.querySelector("#reader-font-size-input")?.value) || 17,
+      lineHeight: Number(document.querySelector("#reader-line-height-input")?.value) || 1.85,
+      width: Number(document.querySelector("#reader-width-input")?.value) || 920,
+    };
+    const profile = await state.adapter.updateUserProfile(user.id, {
+      name: user.name,
+      email: user.email,
+      penName: user.penName ?? "",
+      structureView: user.structureView ?? "list",
+      readerSettings,
+    });
+    persistSession({
+      ...user,
+      ...profile,
+      readerSettings,
+    });
+    state.saveStatus = "Reader settings saved.";
+    return render();
+  }
+
+  if (action === "add-comment") {
+    const user = getUser();
+    const input = document.querySelector("#chapter-comment-input");
+    const body = input?.value.trim() ?? "";
+    if (!user || !body) {
+      state.saveStatus = "Sign in and write a comment first.";
+      return render();
+    }
+    const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+    await (state.adapter.updateChapterEngagement ?? state.adapter.updateChapter)(chapter.id, {
+      comments: [
+        ...(chapter.comments ?? []),
+        {
+          id: makeClientId("comment"),
+          userId: user.id,
+          userName: getDisplayName(user),
+          body,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    state.saveStatus = "Comment added.";
+    return render();
+  }
+
+  if (action === "toggle-reaction") {
+    const user = getUser();
+    if (!user) {
+      state.saveStatus = "Sign in to react.";
+      return render();
+    }
+    const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+    const emoji = actionTarget.dataset.emoji;
+    const reactions = { ...(chapter.reactions ?? {}) };
+    const users = new Set(reactions[emoji] ?? []);
+    if (users.has(user.id)) {
+      users.delete(user.id);
+    } else {
+      users.add(user.id);
+    }
+    reactions[emoji] = [...users];
+    await (state.adapter.updateChapterEngagement ?? state.adapter.updateChapter)(chapter.id, { reactions });
+    state.saveStatus = "Reaction updated.";
     return render();
   }
 
@@ -3105,6 +3544,26 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  if (
+    event.target instanceof HTMLInputElement
+    && (
+      event.target.id === "reader-font-size-input"
+      || event.target.id === "reader-line-height-input"
+      || event.target.id === "reader-width-input"
+    )
+  ) {
+    const preview = document.querySelector("#reader-settings-preview");
+    if (preview) {
+      const fontSize = Number(document.querySelector("#reader-font-size-input")?.value) || 17;
+      const lineHeight = Number(document.querySelector("#reader-line-height-input")?.value) || 1.85;
+      const width = Number(document.querySelector("#reader-width-input")?.value) || 920;
+      preview.style.setProperty("--reader-font-size", `${fontSize}px`);
+      preview.style.setProperty("--reader-line-height", String(lineHeight));
+      preview.style.setProperty("--reader-width", `${width}px`);
+    }
+    return;
+  }
+
   if (event.target instanceof HTMLInputElement && event.target.dataset.action === "set-volume") {
     setSoundtrackVolume(event.target.value);
     return;

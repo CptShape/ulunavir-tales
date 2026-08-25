@@ -499,6 +499,17 @@ textarea::placeholder {
   flex: 1;
 }
 
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle-row input {
+  width: auto;
+  accent-color: var(--gold);
+}
+
 .search-row {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(220px, 0.8fr) auto;
@@ -664,6 +675,29 @@ textarea::placeholder {
   color: #d8e5c7;
 }
 
+.dm-notes-panel,
+.engagement-panel {
+  border-color: rgba(185, 144, 73, 0.24);
+  background:
+    radial-gradient(circle at 95% 0%, rgba(185, 144, 73, 0.12), transparent 26%),
+    rgba(37, 27, 20, 0.72);
+}
+
+.notes-area {
+  min-height: 130px;
+}
+
+.reaction-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.comment-list {
+  display: grid;
+  gap: 12px;
+}
+
 .soundtrack-item {
   display: flex;
   gap: 14px;
@@ -674,6 +708,15 @@ textarea::placeholder {
   border-radius: var(--radius-md);
   border: 1px solid rgba(130, 160, 126, 0.24);
   background: rgba(29, 45, 32, 0.64);
+}
+
+.soundtrack-item > div:first-child {
+  min-width: 0;
+}
+
+.soundtrack-item .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .small-button {
@@ -877,8 +920,44 @@ textarea::placeholder {
 }
 
 .markdown-preview {
-  line-height: 1.85;
+  max-width: var(--reader-width, 920px);
+  margin-inline: auto;
+  font-size: var(--reader-font-size, 17px);
+  line-height: var(--reader-line-height, 1.85);
   color: var(--parchment);
+}
+
+.reader-settings-preview {
+  width: 100%;
+  margin-top: 8px;
+  padding: 22px;
+  border: 1px solid rgba(201, 169, 113, 0.2);
+  border-radius: var(--radius-md);
+  background:
+    radial-gradient(circle at 12% 0%, rgba(201, 169, 113, 0.12), transparent 28%),
+    rgba(19, 14, 11, 0.56);
+}
+
+.music-cue {
+  display: block;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.music-cue.is-visible {
+  width: fit-content;
+  height: auto;
+  margin: 14px 0;
+  padding: 6px 10px;
+  border: 1px solid rgba(130, 160, 126, 0.34);
+  border-radius: 999px;
+  background: rgba(32, 52, 37, 0.72);
+  color: #d8e5c7;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  opacity: 1;
 }
 
 .html-document-surface {
