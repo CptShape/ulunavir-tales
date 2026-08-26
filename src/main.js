@@ -2345,10 +2345,8 @@ async function renderChapterPage(storyId, arcId, chapterId) {
             </div>
           </section>
           <section class="preview-pane">
-            <div class="section-header">
-              <h3>Preview</h3>
-              ${renderChapterStats(chapter)}
-            </div>
+            <h3>Preview</h3>
+            ${renderChapterStats(chapter)}
             <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*", { showMusicCues: true })}</div>
           </section>
         </div>

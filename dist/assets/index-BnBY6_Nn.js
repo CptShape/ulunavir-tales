@@ -616,10 +616,8 @@ ${`<br />
             </div>
           </section>
           <section class="preview-pane">
-            <div class="section-header">
-              <h3>Preview</h3>
-              ${oa(o)}
-            </div>
+            <h3>Preview</h3>
+            ${oa(o)}
             <div class="markdown-preview" data-preview-mode="${l}">${Tt(o,"*Start writing to preview your chapter here.*",{showMusicCues:!0})}</div>
           </section>
         </div>

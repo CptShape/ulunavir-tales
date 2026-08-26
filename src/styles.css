@@ -939,11 +939,14 @@ textarea::placeholder {
 }
 
 .chapter-text-stats {
+  display: inline-flex;
+  width: fit-content;
+  margin: 0 0 18px;
   padding: 7px 11px;
   border: 1px solid rgba(201, 169, 113, 0.24);
   border-radius: 999px;
-  background: rgba(35, 25, 18, 0.76);
-  color: var(--parchment-dim);
+  background: rgba(64, 45, 28, 0.78);
+  color: var(--gold-bright);
   font-size: 0.84rem;
   white-space: nowrap;
 }
