@@ -1008,6 +1008,33 @@ function renderChapterBody(chapter, fallback, options = {}) {
   });
 }
 
+function getChapterTextStats(body = "", mode = "markdown") {
+  let text = String(body ?? "");
+  if (mode === "html") {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = text;
+    text = wrapper.textContent ?? "";
+  } else {
+    text = text
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+      .replace(/\[music:\s*[^\]]+\]/gi, " ")
+      .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+      .replace(/[#>*_`~\-]/g, " ");
+  }
+
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return {
+    words: normalized ? normalized.split(" ").length : 0,
+    characters: text.replace(/\s+$/g, "").length,
+  };
+}
+
+function renderChapterStats(chapter) {
+  const stats = getChapterTextStats(chapter?.body ?? "", getChapterRenderMode(chapter));
+  return `<div id="chapter-text-stats" class="chapter-text-stats">Words: ${stats.words} · Characters: ${stats.characters}</div>`;
+}
+
 function getWordImagePlaceholders(body = "") {
   const ids = new Set();
   const source = String(body ?? "");
@@ -1314,6 +1341,11 @@ function updateChapterPreviewFromEditor() {
   const draft = getEditorChapterDraft();
   preview.dataset.previewMode = draft.renderMode;
   preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*", { showMusicCues: true });
+  const statsNode = document.querySelector("#chapter-text-stats");
+  if (statsNode) {
+    const stats = getChapterTextStats(draft.body, draft.renderMode);
+    statsNode.textContent = `Words: ${stats.words} · Characters: ${stats.characters}`;
+  }
 }
 
 async function importDocxIntoEditor(file) {
@@ -2313,7 +2345,10 @@ async function renderChapterPage(storyId, arcId, chapterId) {
             </div>
           </section>
           <section class="preview-pane">
-            <h3>Preview</h3>
+            <div class="section-header">
+              <h3>Preview</h3>
+              ${renderChapterStats(chapter)}
+            </div>
             <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*", { showMusicCues: true })}</div>
           </section>
         </div>

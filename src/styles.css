@@ -938,6 +938,16 @@ textarea::placeholder {
     rgba(19, 14, 11, 0.56);
 }
 
+.chapter-text-stats {
+  padding: 7px 11px;
+  border: 1px solid rgba(201, 169, 113, 0.24);
+  border-radius: 999px;
+  background: rgba(35, 25, 18, 0.76);
+  color: var(--parchment-dim);
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+
 .music-cue {
   display: block;
   width: 1px;
