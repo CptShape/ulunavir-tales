@@ -381,6 +381,36 @@ function extractYouTubeVideoId(url) {
   return null;
 }
 
+function parseYouTubeStartSeconds(url) {
+  try {
+    const parsed = new URL(url);
+    const rawTime =
+      parsed.searchParams.get("t")
+      ?? parsed.searchParams.get("start")
+      ?? parsed.searchParams.get("time_continue");
+
+    if (!rawTime) {
+      return 0;
+    }
+
+    if (/^\d+$/.test(rawTime)) {
+      return Math.max(0, Number(rawTime));
+    }
+
+    const match = rawTime.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/i);
+    if (!match) {
+      return 0;
+    }
+
+    const hours = Number(match[1] ?? 0);
+    const minutes = Number(match[2] ?? 0);
+    const seconds = Number(match[3] ?? 0);
+    return (hours * 3600) + (minutes * 60) + seconds;
+  } catch {
+    return 0;
+  }
+}
+
 function parseSoundtrackEntry(entry) {
   const rawUrl = entry?.url?.trim();
   const url = rawUrl && !/^https?:\/\//i.test(rawUrl) ? `https://${rawUrl}` : rawUrl;
@@ -396,6 +426,7 @@ function parseSoundtrackEntry(entry) {
       url,
       source: "youtube",
       videoId: youtubeId,
+      startSeconds: parseYouTubeStartSeconds(url),
     };
   }
 
@@ -556,7 +587,7 @@ function requestSoundtrackRecovery(reason = "Playback interrupted", delay = 2200
     state.soundtrack.recoveryAttempts += 1;
     try {
       if (state.soundtrack.recoveryAttempts % 4 === 0 && current.videoId) {
-        state.soundtrack.youtubePlayer.loadVideoById(current.videoId);
+        loadYouTubeTrack(current);
       } else {
         state.soundtrack.youtubePlayer.playVideo();
       }
@@ -631,7 +662,7 @@ function loopCurrentSoundtrack() {
       state.soundtrack.youtubePlayer.seekTo(0, true);
       state.soundtrack.youtubePlayer.playVideo();
     } else if (state.soundtrack.youtubePlayer?.loadVideoById && active.videoId) {
-      state.soundtrack.youtubePlayer.loadVideoById(active.videoId);
+      loadYouTubeTrack(active, 0);
     }
     setSoundtrackStatus(`Looping cue: ${active.label}`);
     requestSoundtrackRecovery("Cue loop did not restart", 5000);
@@ -685,6 +716,17 @@ function adjustSoundtrackVolume(delta) {
   setSoundtrackVolume(clampVolume(state.soundtrack.volume + delta));
 }
 
+function loadYouTubeTrack(track, startSeconds = track.startSeconds ?? 0) {
+  if (!state.soundtrack.youtubePlayer?.loadVideoById) {
+    return;
+  }
+
+  state.soundtrack.youtubePlayer.loadVideoById({
+    videoId: track.videoId,
+    startSeconds: Math.max(0, Number(startSeconds) || 0),
+  });
+}
+
 async function ensureYouTubePlayer(track, token) {
   await loadExternalScript("https://www.youtube.com/iframe_api", () => Boolean(window.YT?.Player));
 
@@ -705,6 +747,7 @@ async function ensureYouTubePlayer(track, token) {
             autoplay: 1,
             controls: 1,
             rel: 0,
+            start: track.startSeconds || 0,
           },
           events: {
             onReady: () => resolve(),
@@ -772,7 +815,7 @@ async function ensureYouTubePlayer(track, token) {
       }
     });
   } else {
-    state.soundtrack.youtubePlayer.loadVideoById(track.videoId);
+    loadYouTubeTrack(track);
   }
 
   if (token !== state.soundtrack.syncToken) {
