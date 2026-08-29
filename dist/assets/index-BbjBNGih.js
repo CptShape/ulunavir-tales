@@ -7,6 +7,8 @@ A storm hangs over the harbor while the first lanterns come alive.`,published:!0
       <iframe
         src="https://www.youtube.com/embed/${u(a.videoId)}?${s.toString()}"
         title="${u(a.label)}"
+        width="100%"
+        height="506"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
         allowfullscreen
         loading="lazy"
@@ -19,7 +21,7 @@ ${`${i}
 `.repeat(C.length-2)}
 `);let c=u(d);return c=c.replaceAll(i,"<br />"),c.replace(/```([\s\S]*?)```/g,(C,x)=>`<pre><code>${x.trim()}</code></pre>`).replace(/!\[([^\]]*)\]\(([^)]+)\)/g,'<p><img alt="$1" src="$2" /></p>').replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target="_blank" rel="noreferrer">$1</a>').replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/\*(.+?)\*/g,"<em>$1</em>").replace(/\[music:\s*([^\]]+)\]/gi,(C,x)=>oa(x,a,o)).replace(/\[video:\s*([^\]]+)\]/gi,(C,x)=>ia(x,s)).replace(/^### (.*)$/gm,"<h3>$1</h3>").replace(/^## (.*)$/gm,"<h2>$1</h2>").replace(/^# (.*)$/gm,"<h1>$1</h1>").replace(/(?:^|\n)- (.*(?:\n- .*)*)/g,C=>`
 <ul>${C.trim().split(`
-`).map(E=>E.replace(/^- /,"").trim()).map(E=>`<li>${E}</li>`).join("")}</ul>`).split(/\n{2,}/).map(C=>/^<(h\d|ul|ol|pre|p|blockquote|table|hr|br|figure|div)/.test(C.trim())?C:`<p>${C.replace(/\n/g,"<br />")}</p>`).join("")}function ca(e){return String(e??"").replace(/<script\b[\s\S]*?<\/script>/gi,"").replace(/\n{3,}/g,t=>`
+`).map(E=>E.replace(/^- /,"").trim()).map(E=>`<li>${E}</li>`).join("")}</ul>`).split(/\n{2,}/).map(C=>/^<(h\d|ul|ol|pre|p|blockquote|table|hr|br|figure|div)\b/.test(C.trim())?C:`<p>${C.replace(/\n/g,"<br />")}</p>`).join("")}function ca(e){return String(e??"").replace(/<script\b[\s\S]*?<\/script>/gi,"").replace(/\n{3,}/g,t=>`
 
 ${`<br />
 `.repeat(t.length-2)}

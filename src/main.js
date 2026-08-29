@@ -1008,6 +1008,8 @@ function renderVideoEmbed(videoId, videos) {
       <iframe
         src="https://www.youtube.com/embed/${escapeHtml(video.videoId)}?${params.toString()}"
         title="${escapeHtml(video.label)}"
+        width="100%"
+        height="506"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
         allowfullscreen
         loading="lazy"
@@ -1052,7 +1054,7 @@ function renderMarkdown(markdown, options = {}) {
   return listNormalized
     .split(/\n{2,}/)
     .map((block) => {
-      if (/^<(h\d|ul|ol|pre|p|blockquote|table|hr|br|figure|div)/.test(block.trim())) {
+      if (/^<(h\d|ul|ol|pre|p|blockquote|table|hr|br|figure|div)\b/.test(block.trim())) {
         return block;
       }
 
