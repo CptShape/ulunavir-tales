@@ -433,12 +433,38 @@ function parseSoundtrackEntry(entry) {
   return null;
 }
 
+function parseVideoEntry(entry) {
+  const rawUrl = entry?.url?.trim();
+  const url = rawUrl && !/^https?:\/\//i.test(rawUrl) ? `https://${rawUrl}` : rawUrl;
+  if (!url) {
+    return null;
+  }
+
+  const youtubeId = extractYouTubeVideoId(url);
+  if (!youtubeId) {
+    return null;
+  }
+
+  return {
+    id: entry.id ?? makeClientId("video"),
+    label: normalizeTrackLabel(entry.label, "YouTube video"),
+    url,
+    source: "youtube",
+    videoId: youtubeId,
+    startSeconds: parseYouTubeStartSeconds(url),
+  };
+}
+
 function buildSoundtrackQueue(soundtracks = []) {
   return soundtracks.map(parseSoundtrackEntry).filter(Boolean);
 }
 
 function buildSoundtrackLabelMap(soundtracks = []) {
   return new Map(buildSoundtrackQueue(soundtracks).map((track) => [track.id, track.label]));
+}
+
+function buildVideoMap(videos = []) {
+  return new Map(videos.map(parseVideoEntry).filter(Boolean).map((video) => [video.id, video]));
 }
 
 function hasMarkdownMusicMarkers(chapter) {
@@ -962,9 +988,39 @@ function renderMusicCue(trackId, soundtrackLabels, showMusicCues) {
   return `<span class="music-cue ${showMusicCues ? "is-visible" : ""}" data-music-trigger="${escapeHtml(cleanId)}">${showMusicCues ? `Music cue: ${escapeHtml(label)}` : ""}</span>`;
 }
 
+function renderVideoEmbed(videoId, videos) {
+  const cleanId = String(videoId ?? "").trim();
+  const video = videos.get(cleanId);
+  if (!video) {
+    return `<div class="video-embed-missing">Missing video: ${escapeHtml(cleanId)}</div>`;
+  }
+
+  const params = new URLSearchParams({
+    rel: "0",
+    modestbranding: "1",
+  });
+  if (video.startSeconds) {
+    params.set("start", String(video.startSeconds));
+  }
+
+  return `
+    <figure class="chapter-video">
+      <iframe
+        src="https://www.youtube.com/embed/${escapeHtml(video.videoId)}?${params.toString()}"
+        title="${escapeHtml(video.label)}"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        allowfullscreen
+        loading="lazy"
+      ></iframe>
+      <figcaption>${escapeHtml(video.label)}</figcaption>
+    </figure>
+  `;
+}
+
 function renderMarkdown(markdown, options = {}) {
   const source = String(markdown ?? "");
   const soundtrackLabels = options.soundtrackLabels ?? new Map();
+  const videos = options.videos ?? new Map();
   const showMusicCues = Boolean(options.showMusicCues);
   const extraBreakToken = "ULUNAVIR_SAFE_EXTRA_BREAK";
   const normalized = source.replace(/\n{3,}/g, (match) => `\n\n${`${extraBreakToken}\n`.repeat(match.length - 2)}\n`);
@@ -975,7 +1031,9 @@ function renderMarkdown(markdown, options = {}) {
   const linked = imageified.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   const bolded = linked.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   const italicized = bolded.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  const musicMarked = italicized.replace(/\[music:\s*([^\]]+)\]/gi, (_, trackId) => renderMusicCue(trackId, soundtrackLabels, showMusicCues));
+  const musicMarked = italicized
+    .replace(/\[music:\s*([^\]]+)\]/gi, (_, trackId) => renderMusicCue(trackId, soundtrackLabels, showMusicCues))
+    .replace(/\[video:\s*([^\]]+)\]/gi, (_, videoId) => renderVideoEmbed(videoId, videos));
   const headings = musicMarked
     .replace(/^### (.*)$/gm, "<h3>$1</h3>")
     .replace(/^## (.*)$/gm, "<h2>$1</h2>")
@@ -994,7 +1052,7 @@ function renderMarkdown(markdown, options = {}) {
   return listNormalized
     .split(/\n{2,}/)
     .map((block) => {
-      if (/^<(h\d|ul|ol|pre|p|blockquote|table|hr|br)/.test(block.trim())) {
+      if (/^<(h\d|ul|ol|pre|p|blockquote|table|hr|br|figure|div)/.test(block.trim())) {
         return block;
       }
 
@@ -1047,6 +1105,7 @@ function renderChapterBody(chapter, fallback, options = {}) {
 
   return renderMarkdown(body, {
     soundtrackLabels: buildSoundtrackLabelMap(chapter?.soundtracks ?? []),
+    videos: buildVideoMap(chapter?.videos ?? []),
     showMusicCues: Boolean(options.showMusicCues),
   });
 }
@@ -1062,6 +1121,7 @@ function getChapterTextStats(body = "", mode = "markdown") {
       .replace(/```[\s\S]*?```/g, " ")
       .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
       .replace(/\[music:\s*[^\]]+\]/gi, " ")
+      .replace(/\[video:\s*[^\]]+\]/gi, " ")
       .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
       .replace(/[#>*_`~\-]/g, " ");
   }
@@ -2087,6 +2147,50 @@ function renderSoundtrackPanel(chapter) {
   `;
 }
 
+function renderVideoPanel(chapter) {
+  const videos = chapter.videos ?? [];
+  const markdownMode = getChapterRenderMode(chapter) === "markdown";
+  return `
+    <section class="panel stack video-panel">
+      <div class="section-header">
+        <div>
+          <h3>Videos</h3>
+          <p class="muted">Add YouTube videos and place them inside this markdown chapter.</p>
+        </div>
+        <span class="pill">${videos.length} video(s)</span>
+      </div>
+      ${
+        markdownMode
+          ? `<div class="inline-form video-form">
+              <input id="video-label-input" placeholder="Optional label, for example Prophecy Scene" />
+              <input id="video-url-input" placeholder="https://youtube.com/watch?v=...&t=20s" />
+              <button class="ghost-button" data-action="add-video" data-chapter-id="${chapter.id}">Add video</button>
+            </div>`
+          : '<div class="notice">Video embeds are available in Markdown Mode only.</div>'
+      }
+      <div class="video-list">
+        ${
+          videos.length
+            ? videos.map((video) => `
+                <article class="video-item">
+                  <div>
+                    <strong>${escapeHtml(video.label?.trim() || "Untitled video")}</strong>
+                    ${markdownMode ? `<div class="muted mono">[video: ${escapeHtml(video.id)}]</div>` : ""}
+                    <div class="muted mono">${escapeHtml(video.url ?? "")}</div>
+                  </div>
+                  <div class="card-actions">
+                    ${markdownMode ? `<button class="small-button" data-action="copy-video-marker" data-video-id="${video.id}">Copy embed</button>` : ""}
+                    <button class="danger-button" data-action="delete-video" data-chapter-id="${chapter.id}" data-video-id="${video.id}">Remove</button>
+                  </div>
+                </article>
+              `).join("")
+            : '<div class="empty-state">No video links yet.</div>'
+        }
+      </div>
+    </section>
+  `;
+}
+
 function renderChapterEngagementPanel(chapter, editable = false) {
   const user = getUser();
   const reactions = chapter.reactions ?? {};
@@ -2383,6 +2487,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
                   </div>
                 </div>
               ` : ""}
+              ${renderVideoPanel(chapter)}
               ${renderSoundtrackPanel(chapter)}
               <div class="notice mono">${escapeHtml(state.saveStatus || "Tip: use `![alt](image-url)` to place pasted external images into the chapter body.")}</div>
             </div>
@@ -3249,7 +3354,14 @@ document.addEventListener("click", async (event) => {
       state.saveStatus = "Please enter a valid YouTube link.";
       return render();
     }
+    const draft = getEditorChapterDraft();
     await state.adapter.updateChapter(chapter.id, {
+      title: document.querySelector("#chapter-title-input")?.value.trim() || chapter.title || "Untitled Chapter",
+      body: draft.body,
+      published: document.querySelector("#chapter-published-input")?.checked ?? isChapterPublished(chapter),
+      dmNotes: document.querySelector("#chapter-dm-notes-input")?.value ?? chapter.dmNotes ?? "",
+      renderMode: draft.renderMode,
+      htmlBackground: draft.htmlBackground,
       soundtracks: [...(chapter.soundtracks ?? []), { id: parsed.id, label: parsed.label, url: parsed.url }],
     });
     state.saveStatus = "Soundtrack added.";
@@ -3277,6 +3389,53 @@ document.addEventListener("click", async (event) => {
       soundtracks: (chapter.soundtracks ?? []).filter((track) => track.id !== actionTarget.dataset.soundtrackId),
     });
     state.saveStatus = "Soundtrack removed.";
+    return render();
+  }
+
+  if (action === "add-video") {
+    const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+    const label = document.querySelector("#video-label-input")?.value.trim() ?? "";
+    const url = document.querySelector("#video-url-input")?.value.trim() ?? "";
+    const parsed = parseVideoEntry({ id: makeClientId("video"), label, url });
+    if (!parsed) {
+      state.saveStatus = "Please enter a valid YouTube video link.";
+      return render();
+    }
+    const draft = getEditorChapterDraft();
+    await state.adapter.updateChapter(chapter.id, {
+      title: document.querySelector("#chapter-title-input")?.value.trim() || chapter.title || "Untitled Chapter",
+      body: draft.body,
+      published: document.querySelector("#chapter-published-input")?.checked ?? isChapterPublished(chapter),
+      dmNotes: document.querySelector("#chapter-dm-notes-input")?.value ?? chapter.dmNotes ?? "",
+      renderMode: draft.renderMode,
+      htmlBackground: draft.htmlBackground,
+      videos: [...(chapter.videos ?? []), { id: parsed.id, label: parsed.label, url: parsed.url }],
+    });
+    state.saveStatus = "Video added. Copy its embed marker into the chapter.";
+    return render();
+  }
+
+  if (action === "copy-video-marker") {
+    const marker = `[video: ${actionTarget.dataset.videoId}]`;
+    try {
+      await copyTextToClipboard(marker);
+      state.saveStatus = `Copied video embed: ${marker}`;
+    } catch (error) {
+      state.saveStatus = `Copy failed. Use this marker manually: ${marker}`;
+    }
+    const statusNode = document.querySelector(".notice.mono");
+    if (statusNode) {
+      statusNode.textContent = state.saveStatus;
+    }
+    return;
+  }
+
+  if (action === "delete-video") {
+    const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+    await state.adapter.updateChapter(chapter.id, {
+      videos: (chapter.videos ?? []).filter((video) => video.id !== actionTarget.dataset.videoId),
+    });
+    state.saveStatus = "Video removed.";
     return render();
   }
 

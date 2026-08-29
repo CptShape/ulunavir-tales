@@ -93,6 +93,7 @@ const starterState = {
       htmlBackground: "",
       assets: [],
       soundtracks: [],
+      videos: [],
       createdAt: new Date("2026-08-18T10:00:00Z").toISOString(),
       updatedAt: new Date("2026-08-18T10:00:00Z").toISOString(),
     },
@@ -129,6 +130,7 @@ function normalizeChapter(chapter) {
     reactions: chapter.reactions ?? {},
     assets: chapter.assets ?? [],
     soundtracks: chapter.soundtracks ?? [],
+    videos: chapter.videos ?? [],
     renderMode: chapter.renderMode ?? "markdown",
     htmlBackground: chapter.htmlBackground ?? "",
   };
@@ -558,6 +560,7 @@ function createLocalAdapter() {
         htmlBackground: "",
         assets: [],
         soundtracks: [],
+        videos: [],
         createdAt: now,
         updatedAt: now,
       };
@@ -1227,6 +1230,7 @@ function createFirebaseAdapter(authClient) {
         htmlBackground: "",
         assets: [],
         soundtracks: [],
+        videos: [],
         createdAt: now,
         updatedAt: now,
       };
