@@ -1019,6 +1019,19 @@ function renderVideoEmbed(videoId, videos) {
   `;
 }
 
+function renderChapterImageFrame(imageHtml) {
+  return `
+    <figure class="chapter-image-frame is-fill" data-image-view="fill" data-auto-image-view="true">
+      <button class="small-button image-view-toggle" type="button" data-action="toggle-image-view" title="Toggle image view">Desired</button>
+      ${imageHtml}
+    </figure>
+  `;
+}
+
+function renderMarkdownImage(alt, src) {
+  return renderChapterImageFrame(`<img alt="${alt}" src="${escapeHtml(getDisplayImageUrl(src))}" />`);
+}
+
 function renderMarkdown(markdown, options = {}) {
   const source = String(markdown ?? "");
   const soundtrackLabels = options.soundtrackLabels ?? new Map();
@@ -1031,7 +1044,7 @@ function renderMarkdown(markdown, options = {}) {
   const fenced = escaped.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
   const imageified = fenced.replace(
     /!\[([^\]]*)\]\(([^)]+)\)/g,
-    (_, alt, src) => `<p><img alt="${alt}" src="${escapeHtml(getDisplayImageUrl(src))}" /></p>`,
+    (_, alt, src) => renderMarkdownImage(alt, src),
   );
   const linked = imageified.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   const bolded = linked.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -1073,6 +1086,7 @@ function renderHtmlDocument(html) {
       /\bsrc=(["'])(https?:\/\/t\d+\.pixhost\.(?:to|cc)\/thumbs\/[^"']+)\1/gi,
       (_, quote, src) => `src=${quote}${escapeHtml(getDisplayImageUrl(src))}${quote}`,
     )
+    .replace(/<img\b[^>]*>/gi, (imageHtml) => renderChapterImageFrame(imageHtml))
     .replace(/\n{3,}/g, (match) => `\n\n${"<br />\n".repeat(match.length - 2)}\n`);
 }
 
@@ -1453,6 +1467,7 @@ function updateChapterPreviewFromEditor() {
   const draft = getEditorChapterDraft();
   preview.dataset.previewMode = draft.renderMode;
   preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*", { showMusicCues: true });
+  initializeChapterImageViews(preview);
   const statsNode = document.querySelector("#chapter-text-stats");
   if (statsNode) {
     const stats = getChapterTextStats(draft.body, draft.renderMode);
@@ -1622,6 +1637,53 @@ function layout(content, activeTab, quickToolsContent = "") {
     const contentRoot = appRoot.querySelector(".content");
     contentRoot.insertAdjacentHTML("afterbegin", `${statusNotice}${loadNotice}${authNotice}`);
   }
+
+  initializeChapterImageViews();
+}
+
+function setChapterImageView(frame, mode, explicit = true) {
+  const nextMode = mode === "desired" ? "desired" : "fill";
+  frame.dataset.imageView = nextMode;
+  if (explicit) {
+    frame.dataset.autoImageView = "false";
+  }
+  frame.classList.toggle("is-desired", nextMode === "desired");
+  frame.classList.toggle("is-fill", nextMode !== "desired");
+
+  const button = frame.querySelector("[data-action='toggle-image-view']");
+  if (button) {
+    button.textContent = nextMode === "desired" ? "Fill" : "Desired";
+    button.title = nextMode === "desired" ? "Switch to fill view" : "Switch to desired view";
+  }
+}
+
+function applyAutomaticChapterImageView(frame) {
+  if (frame.dataset.autoImageView === "false") {
+    return;
+  }
+
+  const image = frame.querySelector("img");
+  if (!image?.naturalWidth || !image?.naturalHeight) {
+    return;
+  }
+
+  setChapterImageView(frame, image.naturalHeight > image.naturalWidth ? "desired" : "fill", false);
+}
+
+function initializeChapterImageViews(root = document) {
+  root.querySelectorAll(".chapter-image-frame").forEach((frame) => {
+    const image = frame.querySelector("img");
+    if (!image) {
+      return;
+    }
+
+    if (image.complete) {
+      applyAutomaticChapterImageView(frame);
+      return;
+    }
+
+    image.addEventListener("load", () => applyAutomaticChapterImageView(frame), { once: true });
+  });
 }
 
 async function renderSettings() {
@@ -3280,6 +3342,17 @@ document.addEventListener("click", async (event) => {
   }
 
   const action = actionTarget.dataset.action;
+
+  if (action === "toggle-image-view") {
+    const frame = actionTarget.closest(".chapter-image-frame");
+    if (!frame) {
+      return;
+    }
+
+    const nextMode = frame.dataset.imageView === "desired" ? "fill" : "desired";
+    setChapterImageView(frame, nextMode);
+    return;
+  }
 
   if (action === "toggle-login") {
     return showLoginModal();
