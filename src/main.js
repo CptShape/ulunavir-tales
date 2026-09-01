@@ -1029,7 +1029,10 @@ function renderMarkdown(markdown, options = {}) {
   let escaped = escapeHtml(normalized);
   escaped = escaped.replaceAll(extraBreakToken, "<br />");
   const fenced = escaped.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
-  const imageified = fenced.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<p><img alt="$1" src="$2" /></p>');
+  const imageified = fenced.replace(
+    /!\[([^\]]*)\]\(([^)]+)\)/g,
+    (_, alt, src) => `<p><img alt="${alt}" src="${escapeHtml(getDisplayImageUrl(src))}" /></p>`,
+  );
   const linked = imageified.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   const bolded = linked.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   const italicized = bolded.replace(/\*(.+?)\*/g, "<em>$1</em>");
@@ -1066,6 +1069,10 @@ function renderMarkdown(markdown, options = {}) {
 function renderHtmlDocument(html) {
   return String(html ?? "")
     .replace(/<script\b[\s\S]*?<\/script>/gi, "")
+    .replace(
+      /\bsrc=(["'])(https?:\/\/t\d+\.pixhost\.(?:to|cc)\/thumbs\/[^"']+)\1/gi,
+      (_, quote, src) => `src=${quote}${escapeHtml(getDisplayImageUrl(src))}${quote}`,
+    )
     .replace(/\n{3,}/g, (match) => `\n\n${"<br />\n".repeat(match.length - 2)}\n`);
 }
 
@@ -2482,7 +2489,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
                     <button class="ghost-button" data-action="add-external-asset" data-chapter-id="${chapter.id}">Add image</button>
                   </div>
                   <div class="notice">
-                    Upload the image to Imgur or Pixhost first, then paste the direct image URL or Pixhost show page here. This saves the asset for the chapter without changing your markdown body.
+                    Upload the image to Imgur or Pixhost first. You can paste a direct image URL, Pixhost Forum small image code, Pixhost HTML small image code, or a Pixhost show page when the browser allows it.
                   </div>
                   <div class="asset-list asset-tray">
                     ${assets.length ? assets.map((asset, index) => renderAssetItem(asset, index, { chapterId: chapter.id, editable: true })).join("") : '<div class="empty-state">No assets in this chapter yet.</div>'}
@@ -2551,8 +2558,9 @@ async function renderChapterPage(storyId, arcId, chapterId) {
 
 function renderAssetItem(asset, index = 0, options = {}) {
   const sourceUrl = asset.url ?? asset.dataUrl ?? "";
+  const displayUrl = sourceUrl ? getDisplayImageUrl(sourceUrl) : "";
   const previewable = Boolean(sourceUrl);
-  const markdown = `![${asset.name}](${sourceUrl})`;
+  const markdown = `![${asset.name}](${displayUrl})`;
   const actions = options.editable
     ? `
         <div class="asset-actions">
@@ -2568,7 +2576,7 @@ function renderAssetItem(asset, index = 0, options = {}) {
   return `
     <article class="asset-item">
       ${actions}
-      ${previewable ? `<img src="${escapeHtml(sourceUrl)}" alt="${escapeHtml(asset.name)}" />` : ""}
+      ${previewable ? `<img src="${escapeHtml(displayUrl)}" alt="${escapeHtml(asset.name)}" />` : ""}
       <strong title="${escapeHtml(asset.name)}">${escapeHtml(asset.name)}</strong>
       <div class="muted mono asset-markdown" title="${escapeHtml(markdown)}">${escapeHtml(markdown)}</div>
     </article>
@@ -2924,6 +2932,57 @@ function hasImageExtension(parsed) {
   return /\.(avif|gif|jpe?g|png|webp)$/i.test(fileName);
 }
 
+function getPixhostFullImageFromThumbnailUrl(parsed) {
+  const normalizedHost = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+  const thumbnailMatch = normalizedHost.match(/^t(\d+)\.pixhost\.(?:to|cc)$/i);
+  if (!thumbnailMatch) {
+    return "";
+  }
+
+  const pathMatch = parsed.pathname.match(/^\/thumbs\/(\d+)\/(\d+)_(.+)$/i);
+  if (!pathMatch) {
+    return "";
+  }
+
+  const [, directoryId, imageId, fileName] = pathMatch;
+  return `${parsed.protocol}//img${thumbnailMatch[1]}.pixhost.to/images/${directoryId}/${imageId}_${fileName}${parsed.search}`;
+}
+
+function getDisplayImageUrl(value) {
+  try {
+    const parsed = new URL(String(value ?? ""), window.location.href);
+    return getPixhostFullImageFromThumbnailUrl(parsed) || parsed.toString();
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function extractImageUrlFromPastedMarkup(value) {
+  const source = String(value ?? "").trim();
+  const patterns = [
+    /\bsrc=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i,
+    /\[img\]([^\[]+)\[\/img\]/i,
+    /!\[[^\]]*\]\(([^)]+)\)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = source.match(pattern);
+    const candidate = match?.[1] ?? match?.[2] ?? match?.[3] ?? "";
+    if (candidate) {
+      return candidate.trim();
+    }
+  }
+
+  const urls = source.match(/https?:\/\/[^\s"'<>[\]()]+/gi) ?? [];
+  return urls.find((candidate) => {
+    try {
+      return hasImageExtension(new URL(candidate));
+    } catch {
+      return false;
+    }
+  }) ?? source;
+}
+
 function getPixhostDirectImageFromDocument(doc, baseUrl) {
   const selectors = [
     "img.image-img",
@@ -2962,25 +3021,25 @@ async function resolvePixhostShowUrl(parsed) {
   try {
     response = await fetch(parsed.toString(), { credentials: "include" });
   } catch {
-    throw new Error("Pixhost page could not be opened by the browser. Paste Pixhost's direct image link instead.");
+    throw new Error("Pixhost page could not be opened by the browser. Paste Pixhost's Forum small image, HTML small image, or direct image link instead.");
   }
 
   if (!response.ok) {
-    throw new Error("Pixhost page could not be opened. Paste Pixhost's direct image link instead.");
+    throw new Error("Pixhost page could not be opened. Paste Pixhost's Forum small image, HTML small image, or direct image link instead.");
   }
 
   const html = await response.text();
   const doc = new DOMParser().parseFromString(html, "text/html");
   const directUrl = getPixhostDirectImageFromDocument(doc, parsed.toString());
   if (!directUrl) {
-    throw new Error("Pixhost page could not be converted to a direct image. If this is an NSFW warning page, open Pixhost once, accept it, then paste the direct image link.");
+    throw new Error("Pixhost page could not be converted to a direct image. Paste Pixhost's Forum small image, HTML small image, or direct image link instead.");
   }
 
   return directUrl;
 }
 
 async function normalizeExternalImageUrl(value) {
-  const url = value.trim();
+  const url = extractImageUrlFromPastedMarkup(value);
   if (!url) {
     throw new Error("Add an image URL first.");
   }
@@ -3000,6 +3059,11 @@ async function normalizeExternalImageUrl(value) {
   const hasExtension = /\.[a-z0-9]{2,5}$/i.test(fileName);
   if (isImgurHost(parsed.hostname) && fileName && !hasExtension) {
     parsed.pathname = `${parsed.pathname}.png`;
+  }
+
+  const pixhostFullImageUrl = getPixhostFullImageFromThumbnailUrl(parsed);
+  if (pixhostFullImageUrl) {
+    return pixhostFullImageUrl;
   }
 
   if (isPixhostShowUrl(parsed)) {
