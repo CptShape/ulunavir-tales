@@ -1159,7 +1159,7 @@ function renderWordImagePanel(chapter) {
       <div class="section-header">
         <div>
           <h3>Word Images</h3>
-          <p class="muted">Paste Imgur or direct image URLs to replace the Word image placeholders in their original positions.</p>
+          <p class="muted">Paste Imgur, Pixhost, or direct image URLs to replace the Word image placeholders in their original positions.</p>
         </div>
         <span class="pill">${placeholders.length} placeholder(s)</span>
       </div>
@@ -1167,7 +1167,7 @@ function renderWordImagePanel(chapter) {
         ${placeholders.map((id) => `
           <div class="inline-form word-image-row">
             <label>IMAGE ${id}</label>
-            <input data-word-image-url="${id}" placeholder="https://i.imgur.com/example.png" />
+            <input data-word-image-url="${id}" placeholder="https://i.imgur.com/example.png or https://pixhost.to/show/..." />
             <button class="ghost-button" type="button" data-action="replace-word-image" data-chapter-id="${chapter.id}" data-image-index="${id}">Apply</button>
           </div>
         `).join("")}
@@ -1187,7 +1187,7 @@ function convertImportedImageMarkers(html) {
     }
 
     const index = imageMatch[1];
-    return `<p><strong>[IMAGE ${index} HERE]</strong><br><span style="color: #c8b595;">Upload this Word image to Imgur, then replace this line with:</span><br><code>![word-image-${index}](PASTE_IMGUR_URL_HERE)</code></p>`;
+    return `<p><strong>[IMAGE ${index} HERE]</strong><br><span style="color: #c8b595;">Upload this Word image to Imgur or Pixhost, then replace this line with:</span><br><code>![word-image-${index}](PASTE_IMAGE_URL_HERE)</code></p>`;
   });
 }
 
@@ -1292,7 +1292,7 @@ function getWordRunStyles(run) {
 }
 
 function renderWordImagePlaceholder(index) {
-  return `<div class="word-image-placeholder" data-word-image-placeholder="${index}"><strong>[IMAGE ${index} HERE]</strong><br />Upload this Word image to Imgur, then replace this block with the Word Images panel.</div>`;
+  return `<div class="word-image-placeholder" data-word-image-placeholder="${index}"><strong>[IMAGE ${index} HERE]</strong><br />Upload this Word image to Imgur or Pixhost, then replace this block with the Word Images panel.</div>`;
 }
 
 function renderWordRun(run, context) {
@@ -2474,15 +2474,15 @@ async function renderChapterPage(storyId, arcId, chapterId) {
                 <div class="panel asset-helper">
                   <div class="section-header">
                     <h3>Image link helper</h3>
-                    <span class="pill">Manual Imgur or external URLs</span>
+                    <span class="pill">Manual Imgur, Pixhost, or external URLs</span>
                   </div>
                   <div class="inline-form asset-form">
                     <input id="asset-name-input" placeholder="Image label, for example cover-art" />
-                    <input id="asset-url-input" placeholder="https://i.imgur.com/your-image.jpg" />
+                    <input id="asset-url-input" placeholder="https://i.imgur.com/your-image.jpg or https://pixhost.to/show/..." />
                     <button class="ghost-button" data-action="add-external-asset" data-chapter-id="${chapter.id}">Add image</button>
                   </div>
                   <div class="notice">
-                    Upload the image to Imgur first, then paste the direct image URL here. This saves the asset for the chapter without changing your markdown body.
+                    Upload the image to Imgur or Pixhost first, then paste the direct image URL or Pixhost show page here. This saves the asset for the chapter without changing your markdown body.
                   </div>
                   <div class="asset-list asset-tray">
                     ${assets.length ? assets.map((asset, index) => renderAssetItem(asset, index, { chapterId: chapter.id, editable: true })).join("") : '<div class="empty-state">No assets in this chapter yet.</div>'}
@@ -2906,7 +2906,80 @@ async function handleDrop(files) {
   await render();
 }
 
-function normalizeExternalImageUrl(value) {
+function isImgurHost(hostname) {
+  return hostname === "imgur.com" || hostname === "www.imgur.com" || hostname === "i.imgur.com";
+}
+
+function isPixhostHost(hostname) {
+  const normalized = hostname.replace(/^www\./i, "").toLowerCase();
+  return normalized === "pixhost.to" || normalized === "pixhost.cc" || normalized === "pixho.st" || normalized.endsWith(".pixho.st");
+}
+
+function isPixhostShowUrl(parsed) {
+  return isPixhostHost(parsed.hostname) && /^\/show\/\d+\/\d+_[^/]+$/i.test(parsed.pathname);
+}
+
+function hasImageExtension(parsed) {
+  const fileName = parsed.pathname.split("/").filter(Boolean).pop() ?? "";
+  return /\.(avif|gif|jpe?g|png|webp)$/i.test(fileName);
+}
+
+function getPixhostDirectImageFromDocument(doc, baseUrl) {
+  const selectors = [
+    "img.image-img",
+    "img#image",
+    ".image-img",
+    ".image-show img",
+    "#show_image img",
+    'meta[property="og:image"]',
+    'meta[name="twitter:image"]',
+    'img[src*="pixhost"]',
+    'img[src*="pixho.st"]',
+  ];
+
+  for (const selector of selectors) {
+    const node = doc.querySelector(selector);
+    const rawUrl = node?.getAttribute("src") ?? node?.getAttribute("content");
+    if (!rawUrl || rawUrl.startsWith("data:")) {
+      continue;
+    }
+
+    try {
+      const candidate = new URL(rawUrl, baseUrl);
+      if (hasImageExtension(candidate) || isPixhostHost(candidate.hostname)) {
+        return candidate.toString();
+      }
+    } catch {
+      // Ignore malformed candidates and keep checking the page.
+    }
+  }
+
+  return "";
+}
+
+async function resolvePixhostShowUrl(parsed) {
+  let response;
+  try {
+    response = await fetch(parsed.toString(), { credentials: "include" });
+  } catch {
+    throw new Error("Pixhost page could not be opened by the browser. Paste Pixhost's direct image link instead.");
+  }
+
+  if (!response.ok) {
+    throw new Error("Pixhost page could not be opened. Paste Pixhost's direct image link instead.");
+  }
+
+  const html = await response.text();
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const directUrl = getPixhostDirectImageFromDocument(doc, parsed.toString());
+  if (!directUrl) {
+    throw new Error("Pixhost page could not be converted to a direct image. If this is an NSFW warning page, open Pixhost once, accept it, then paste the direct image link.");
+  }
+
+  return directUrl;
+}
+
+async function normalizeExternalImageUrl(value) {
   const url = value.trim();
   if (!url) {
     throw new Error("Add an image URL first.");
@@ -2923,11 +2996,14 @@ function normalizeExternalImageUrl(value) {
     throw new Error("Use an http or https image URL.");
   }
 
-  const isImgurHost = parsed.hostname === "imgur.com" || parsed.hostname === "www.imgur.com" || parsed.hostname === "i.imgur.com";
   const fileName = parsed.pathname.split("/").filter(Boolean).pop() ?? "";
   const hasExtension = /\.[a-z0-9]{2,5}$/i.test(fileName);
-  if (isImgurHost && fileName && !hasExtension) {
+  if (isImgurHost(parsed.hostname) && fileName && !hasExtension) {
     parsed.pathname = `${parsed.pathname}.png`;
+  }
+
+  if (isPixhostShowUrl(parsed)) {
+    return resolvePixhostShowUrl(parsed);
   }
 
   return parsed.toString();
@@ -2945,7 +3021,7 @@ async function addExternalAsset(chapterId) {
   const bodyInput = document.querySelector("#chapter-body-input");
 
   const name = nameInput?.value.trim() || "image";
-  const url = normalizeExternalImageUrl(urlInput?.value ?? "");
+  const url = await normalizeExternalImageUrl(urlInput?.value ?? "");
   const nextAsset = {
     id: crypto.randomUUID(),
     name,
@@ -3088,7 +3164,7 @@ async function applyWordImageReplacement(chapterId, imageIndex) {
   }
 
   const input = document.querySelector(`[data-word-image-url="${imageIndex}"]`);
-  const url = normalizeExternalImageUrl(input?.value ?? "");
+  const url = await normalizeExternalImageUrl(input?.value ?? "");
   const nextBody = replaceWordImagePlaceholder(chapter.body ?? "", imageIndex, url);
 
   await state.adapter.updateChapter(chapterId, {
