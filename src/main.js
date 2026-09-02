@@ -697,15 +697,22 @@ function loopCurrentSoundtrack() {
   }
 }
 
-function playSoundtrackById(trackId) {
+function isTrackAlreadyActive(trackId) {
+  const current = getActiveSoundtrack();
+  return current?.id === trackId && state.soundtrack.activeKey === trackId;
+}
+
+function playSoundtrackById(trackId, options = {}) {
   const index = state.soundtrack.queue.findIndex((track) => track.id === trackId);
   if (index < 0) {
     setSoundtrackStatus("Music cue points to a missing soundtrack.");
     return;
   }
 
-  const current = getActiveSoundtrack();
-  if (current?.id === trackId && !state.soundtrack.paused) {
+  if (isTrackAlreadyActive(trackId)) {
+    if (state.soundtrack.paused) {
+      playCurrentSoundtrack();
+    }
     return;
   }
 
@@ -718,6 +725,10 @@ function playSoundtrackById(trackId) {
   clearSoundtrackRecovery();
   persistSoundtrackUi();
   syncSoundtrackPlayback();
+
+  if (options.source === "button") {
+    setSoundtrackStatus(`Cue selected: ${state.soundtrack.queue[index].label}`);
+  }
 }
 
 function clampVolume(value) {
@@ -913,14 +924,16 @@ function activateSoundtrackQueue(arcId, queue, options = {}) {
 
   persistSoundtrackUi();
   if (state.soundtrack.cueMode) {
-    state.soundtrack.paused = true;
-    state.soundtrack.manualPause = true;
-    if (state.soundtrack.youtubePlayer?.pauseVideo) {
-      state.soundtrack.youtubePlayer.pauseVideo();
+    if (queueChanged || !state.soundtrack.activeKey) {
+      state.soundtrack.paused = true;
+      state.soundtrack.manualPause = true;
+      if (state.soundtrack.youtubePlayer?.pauseVideo) {
+        state.soundtrack.youtubePlayer.pauseVideo();
+      }
+      saveStoredSoundtrackState();
+      setSoundtrackStatus("Waiting for music cue.");
+      updateQuickToolButton();
     }
-    saveStoredSoundtrackState();
-    setSoundtrackStatus("Waiting for music cue.");
-    updateQuickToolButton();
     observeSoundtrackCues();
     return;
   }
@@ -929,7 +942,7 @@ function activateSoundtrackQueue(arcId, queue, options = {}) {
 }
 
 function observeSoundtrackCues() {
-  const cues = [...document.querySelectorAll("[data-music-trigger]")];
+  const cues = [...document.querySelectorAll(".music-cue[data-music-trigger]")];
   if (!cues.length || !state.soundtrack.queue.length) {
     return;
   }
@@ -985,7 +998,16 @@ function renderMusicCue(trackId, soundtrackLabels, showMusicCues) {
   }
 
   const label = soundtrackLabels.get(cleanId) ?? cleanId;
-  return `<span class="music-cue ${showMusicCues ? "is-visible" : ""}" data-music-trigger="${escapeHtml(cleanId)}">${showMusicCues ? `Music cue: ${escapeHtml(label)}` : ""}</span>`;
+  if (!showMusicCues) {
+    return `<span class="music-cue" data-music-trigger="${escapeHtml(cleanId)}"></span>`;
+  }
+
+  return `
+    <span class="music-cue is-visible" data-music-trigger="${escapeHtml(cleanId)}">
+      <button class="music-cue-play" type="button" data-action="play-music-cue" data-music-trigger="${escapeHtml(cleanId)}" title="Play ${escapeHtml(label)}">▶</button>
+      <span>Music cue: ${escapeHtml(label)}</span>
+    </span>
+  `;
 }
 
 function renderVideoEmbed(videoId, videos) {
@@ -1466,7 +1488,7 @@ function updateChapterPreviewFromEditor() {
 
   const draft = getEditorChapterDraft();
   preview.dataset.previewMode = draft.renderMode;
-  preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*", { showMusicCues: true });
+  preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*");
   initializeChapterImageViews(preview);
   const statsNode = document.querySelector("#chapter-text-stats");
   if (statsNode) {
@@ -2566,7 +2588,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
           <section class="preview-pane">
             <h3>Preview</h3>
             ${renderChapterStats(chapter)}
-            <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*", { showMusicCues: true })}</div>
+            <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*")}</div>
           </section>
         </div>
       `
@@ -2576,7 +2598,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
             <h3>Reading view</h3>
             <span class="pill">${assets.length} asset(s)</span>
           </div>
-          <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*This chapter is empty.*")}</div>
+          <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*This chapter is empty.*", { showMusicCues: browserView })}</div>
         </section>
         ${chapterPagerBottom}
         ${assets.length ? `<section class="panel stack"><h3>Referenced images</h3><div class="asset-list">${assets.map((asset, index) => renderAssetItem(asset, index)).join("")}</div></section>` : ""}
@@ -3351,6 +3373,14 @@ document.addEventListener("click", async (event) => {
 
     const nextMode = frame.dataset.imageView === "desired" ? "fill" : "desired";
     setChapterImageView(frame, nextMode);
+    return;
+  }
+
+  if (action === "play-music-cue") {
+    const trackId = actionTarget.dataset.musicTrigger;
+    if (trackId) {
+      playSoundtrackById(trackId, { source: "button" });
+    }
     return;
   }
 
