@@ -1,5 +1,5 @@
 import { initializeApp, getApp, getApps } from "firebase/app";
-import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
+import { getAuth, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const DEFAULT_CONFIG = {
@@ -71,14 +71,32 @@ export function initializeFirebase() {
   const auth = getAuth(app);
   const db = getFirestore(app);
   const provider = new GoogleAuthProvider();
+  provider.addScope("email");
+  provider.addScope("profile");
+  provider.setCustomParameters({
+    prompt: "select_account",
+  });
 
   return {
     mode: "firebase",
     auth,
     db,
+    getRedirectUser: async () => {
+      const result = await getRedirectResult(auth);
+      return result?.user ?? null;
+    },
     signIn: async () => {
-      const result = await signInWithPopup(auth, provider);
-      return result.user;
+      try {
+        const result = await signInWithPopup(auth, provider);
+        return result.user;
+      } catch (error) {
+        if (error?.code === "auth/invalid-credential" || error?.code === "auth/internal-error") {
+          await signInWithRedirect(auth, provider);
+          return null;
+        }
+
+        throw error;
+      }
     },
     signOut: async () => signOut(auth),
     watchAuth: (callback) => onAuthStateChanged(auth, callback),
