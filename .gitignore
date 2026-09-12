@@ -3,3 +3,4 @@ serviceAccount*.json
 firebase-admin*.json
 *-firebase-adminsdk-*.json
 firebase-admin.json
+scripts/backups/

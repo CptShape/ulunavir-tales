@@ -1,5 +1,5 @@
 import { initializeApp, getApp, getApps } from "firebase/app";
-import { getAuth, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const DEFAULT_CONFIG = {
@@ -81,22 +81,9 @@ export function initializeFirebase() {
     mode: "firebase",
     auth,
     db,
-    getRedirectUser: async () => {
-      const result = await getRedirectResult(auth);
-      return result?.user ?? null;
-    },
     signIn: async () => {
-      try {
-        const result = await signInWithPopup(auth, provider);
-        return result.user;
-      } catch (error) {
-        if (error?.code === "auth/invalid-credential" || error?.code === "auth/internal-error") {
-          await signInWithRedirect(auth, provider);
-          return null;
-        }
-
-        throw error;
-      }
+      const result = await signInWithPopup(auth, provider);
+      return result.user;
     },
     signOut: async () => signOut(auth),
     watchAuth: (callback) => onAuthStateChanged(auth, callback),

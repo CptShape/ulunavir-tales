@@ -2881,12 +2881,6 @@ async function showLoginModal() {
   if (state.authClient.mode === "firebase") {
     try {
       const user = await state.authClient.signIn();
-      if (!user) {
-        state.authError = "";
-        state.saveStatus = "Continuing sign-in with Google redirect...";
-        return render();
-      }
-
       persistSession({
         id: user.uid,
         name: user.displayName || user.email || "Creator",
@@ -2966,7 +2960,7 @@ function formatAuthError(error) {
   }
 
   if (code === "auth/invalid-credential" || code === "auth/internal-error") {
-    return "Google returned an invalid popup credential. Try again; the app will fall back to a full-page Google redirect if the popup flow is blocked.";
+    return "Google returned an invalid popup credential. This usually means the Firebase Auth Google link for this account needs repair, or the browser Google session is corrupted.";
   }
 
   return code ? `${code}: ${message}` : message;
@@ -4163,34 +4157,11 @@ async function bootstrap() {
   state.adapter = await createDataAdapter(authClient);
 
   if (state.authClient.mode === "firebase") {
-    let handledRedirectSignIn = false;
-    try {
-      const redirectUser = await state.authClient.getRedirectUser?.();
-      if (redirectUser) {
-        handledRedirectSignIn = true;
-        persistSession({
-          id: redirectUser.uid,
-          name: redirectUser.displayName || redirectUser.email || "Creator",
-          email: redirectUser.email,
-          mode: "firebase",
-        });
-        state.authError = "";
-        state.saveStatus = "Signed in with Firebase.";
-      }
-    } catch (error) {
-      console.error("Firebase redirect sign-in failed:", error);
-      state.authError = formatAuthError(error);
-    }
-
     state.authClient.watchAuth((user) => {
       if (!user) {
-        if (handledRedirectSignIn && state.currentUser?.id) {
-          return;
-        }
         persistSession(null);
         safeRender();
       } else {
-        handledRedirectSignIn = false;
         persistSession({
           id: user.uid,
           name: user.displayName || user.email || "Creator",
