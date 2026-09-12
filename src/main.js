@@ -3335,8 +3335,8 @@ async function syncUserProfile() {
   if (profile) {
     persistSession({
       ...user,
-      name: profile.name ?? user.name,
-      email: profile.email ?? user.email,
+      name: profile.name || user.name,
+      email: profile.email || user.email,
       penName: profile.penName ?? "",
       structureView: profile.structureView ?? user.structureView ?? "list",
       readerSettings: profile.readerSettings ?? user.readerSettings ?? getReaderSettings(user),

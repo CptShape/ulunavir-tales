@@ -890,13 +890,15 @@ async function touchUserProfile(db, user) {
 
   const userRef = doc(db, "users", user.id);
   const current = await getDoc(userRef);
+  const currentData = current.exists() ? current.data() : {};
+  const email = user.email ?? currentData.email ?? "";
   const base = {
     id: user.id,
-    name: user.name ?? "Creator",
-    email: user.email ?? "",
-    emailLower: normalizeEmail(user.email),
-    penName: user.penName ?? (current.exists() ? current.data().penName : "") ?? "",
-    structureView: user.structureView ?? (current.exists() ? current.data().structureView : "list") ?? "list",
+    name: user.name ?? currentData.name ?? "Creator",
+    email,
+    emailLower: normalizeEmail(email),
+    penName: user.penName ?? currentData.penName ?? "",
+    structureView: user.structureView ?? currentData.structureView ?? "list",
     updatedAt: new Date().toISOString(),
   };
 
