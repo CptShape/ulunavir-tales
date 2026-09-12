@@ -164,6 +164,33 @@ function normalizeEmail(value) {
   return String(value ?? "").trim().toLowerCase();
 }
 
+async function resolveCurrentUserEmail() {
+  const user = getUser();
+  const sessionEmail = normalizeEmail(user?.email);
+  if (sessionEmail) {
+    return sessionEmail;
+  }
+
+  if (!user?.id || !state.adapter?.getUserProfile) {
+    return "";
+  }
+
+  const profile = await state.adapter.getUserProfile(user.id);
+  const profileEmail = normalizeEmail(profile?.email);
+  if (profileEmail) {
+    persistSession({
+      ...user,
+      email: profile.email,
+      name: profile.name || user.name,
+      penName: profile.penName ?? user.penName ?? "",
+      structureView: profile.structureView ?? user.structureView ?? "list",
+      readerSettings: profile.readerSettings ?? user.readerSettings ?? getReaderSettings(user),
+    });
+  }
+
+  return profileEmail;
+}
+
 function isStoryEditor(story) {
   const email = normalizeEmail(getUser()?.email);
   return Boolean(email && (story?.editorEmails ?? []).includes(email));
@@ -1880,6 +1907,7 @@ async function renderCreator() {
   let stories = [];
   let editorStories = [];
   let transfers = [];
+  let userEmail = "";
 
   try {
     stories = await state.adapter.listCreatorStories(user?.id);
@@ -1888,16 +1916,24 @@ async function renderCreator() {
     state.loadError = "Your stories could not be loaded right now.";
   }
 
-  try {
-    editorStories = await state.adapter.listEditorStories?.(user?.email) ?? [];
-  } catch (error) {
-    console.error("Editor story list failed:", error);
-    state.loadError = "Editor permissions could not be loaded right now.";
+  if (user) {
+    try {
+      userEmail = await resolveCurrentUserEmail();
+    } catch (error) {
+      console.error("User email resolve failed:", error);
+    }
   }
 
-  if (user?.email) {
+  if (userEmail) {
     try {
-      transfers = await state.adapter.listIncomingStoryTransfers?.(user.email) ?? [];
+      editorStories = await state.adapter.listEditorStories?.(userEmail) ?? [];
+    } catch (error) {
+      console.error("Editor story list failed:", error);
+      state.loadError = "Editor permissions could not be loaded right now.";
+    }
+
+    try {
+      transfers = await state.adapter.listIncomingStoryTransfers?.(userEmail) ?? [];
     } catch (error) {
       console.error("Incoming transfer list failed:", error);
       state.loadError = "Ownership requests could not be loaded right now.";
