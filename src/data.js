@@ -403,6 +403,23 @@ function createLocalAdapter() {
       saveLocalState(state);
       return normalizeStory(story, state);
     },
+    async removeStoryEditor(storyId, email) {
+      const emailLower = normalizeEmail(email);
+      if (!emailLower) {
+        throw new Error("Choose an editor to remove.");
+      }
+
+      const state = loadLocalState();
+      const story = state.stories[storyId];
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+
+      story.editorEmails = (story.editorEmails ?? []).filter((entry) => normalizeEmail(entry) !== emailLower);
+      story.updatedAt = new Date().toISOString();
+      saveLocalState(state);
+      return normalizeStory(story, state);
+    },
     async requestStoryTransfer(storyId, targetEmail, requestedBy) {
       const state = loadLocalState();
       const story = state.stories[storyId];
@@ -1078,6 +1095,24 @@ function createFirebaseAdapter(authClient) {
       }
 
       const editorEmails = [...new Set([...(story.editorEmails ?? []), emailLower])];
+      await updateDoc(doc(db, "stories", storyId), {
+        editorEmails,
+        updatedAt: new Date().toISOString(),
+      });
+      return fetchStoryBundle(db, storyId);
+    },
+    async removeStoryEditor(storyId, email) {
+      const emailLower = normalizeEmail(email);
+      if (!emailLower) {
+        throw new Error("Choose an editor to remove.");
+      }
+
+      const story = await fetchStoryBundle(db, storyId);
+      if (!story) {
+        throw new Error("Story not found.");
+      }
+
+      const editorEmails = (story.editorEmails ?? []).filter((entry) => normalizeEmail(entry) !== emailLower);
       await updateDoc(doc(db, "stories", storyId), {
         editorEmails,
         updatedAt: new Date().toISOString(),

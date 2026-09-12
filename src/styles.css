@@ -575,6 +575,48 @@ textarea::placeholder {
   border-color: rgba(201, 169, 113, 0.24);
 }
 
+.editor-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.editor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 6px 7px 6px 11px;
+  border: 1px solid rgba(201, 169, 113, 0.22);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(90, 62, 39, 0.72), rgba(43, 30, 22, 0.82));
+  color: var(--parchment);
+  box-shadow: inset 0 1px 0 rgba(255, 235, 197, 0.05);
+}
+
+.editor-chip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-remove-button {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  border-radius: 999px;
+  color: #f0b0a6;
+  background: rgba(36, 18, 15, 0.82);
+}
+
+.editor-remove-button:hover {
+  border-color: rgba(240, 176, 166, 0.45);
+  background: rgba(91, 36, 28, 0.88);
+}
+
 .mono {
   font-family: "Courier New", monospace;
 }

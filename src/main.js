@@ -2110,6 +2110,33 @@ function renderBrowserStoryCard(story) {
   `;
 }
 
+function renderEditorChips(story, editable = false) {
+  const editors = story.editorEmails ?? [];
+  if (!editors.length) {
+    return "";
+  }
+
+  return `
+    <div class="editor-chip-list" aria-label="Story editors">
+      ${editors.map((email) => `
+        <span class="editor-chip">
+          <span>${escapeHtml(email)}</span>
+          ${editable ? `
+            <button
+              class="small-button editor-remove-button"
+              type="button"
+              title="Remove editor"
+              data-action="remove-story-editor"
+              data-story-id="${story.id}"
+              data-editor-email="${escapeHtml(email)}"
+            >🗑</button>
+          ` : ""}
+        </span>
+      `).join("")}
+    </div>
+  `;
+}
+
 async function renderStoryPage(storyId) {
   const story = await state.adapter.getStory(storyId);
   if (!story) {
@@ -2162,7 +2189,10 @@ async function renderStoryPage(storyId) {
           <div class="notice">
             <strong>${escapeHtml(story.creatorName)}</strong>
             <div class="muted">Created ${formatDate(story.createdAt)}. Visibility is currently ${escapeHtml(story.visibility)}.</div>
-            ${story.editorEmails?.length ? `<div class="muted">Editors: ${escapeHtml(story.editorEmails.join(", "))}</div>` : ""}
+            ${story.editorEmails?.length ? `
+              <div class="muted">Editors</div>
+              ${renderEditorChips(story, owner && !browserView)}
+            ` : ""}
           </div>
           ${owner && pendingTransfer ? `
             <div class="notice">
@@ -3516,6 +3546,18 @@ document.addEventListener("click", async (event) => {
 
     await state.adapter.addStoryEditor(actionTarget.dataset.storyId, email);
     state.saveStatus = `Editor added: ${editorEmail}`;
+    return render();
+  }
+
+  if (action === "remove-story-editor") {
+    const email = actionTarget.dataset.editorEmail ?? "";
+    if (!email) {
+      state.saveStatus = "Editor email could not be found.";
+      return render();
+    }
+
+    await state.adapter.removeStoryEditor(actionTarget.dataset.storyId, email);
+    state.saveStatus = `Editor removed: ${normalizeEmail(email)}`;
     return render();
   }
 
