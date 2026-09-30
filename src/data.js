@@ -136,12 +136,14 @@ function buildDefaultPhase(chapterIds = []) {
 
 function normalizeChapter(chapter) {
   const coverImageMode = normalizeCoverMode(chapter.coverImageMode);
+  const hasEverBeenPublished = chapter.hasEverBeenPublished ?? chapter.published === true;
   return {
     ...chapter,
     body: chapter.body ?? "",
     coverImageUrl: chapter.coverImageUrl ?? "",
     coverImageMode,
     published: chapter.published ?? true,
+    hasEverBeenPublished,
     dmNotes: chapter.dmNotes ?? "",
     comments: chapter.comments ?? [],
     reactions: chapter.reactions ?? {},
@@ -599,6 +601,7 @@ function createLocalAdapter() {
         coverImageUrl: "",
         coverImageMode: "fill",
         published: false,
+        hasEverBeenPublished: false,
         dmNotes: "",
         comments: [],
         reactions: {},
@@ -1344,6 +1347,7 @@ function createFirebaseAdapter(authClient) {
         coverImageUrl: "",
         coverImageMode: "fill",
         published: false,
+        hasEverBeenPublished: false,
         dmNotes: "",
         comments: [],
         reactions: {},

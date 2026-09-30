@@ -80,6 +80,19 @@ Then fill in your Firebase project values.
 
 Each story stores its `arcIds` in order, and each arc stores its `chapterIds` in order so reordering is preserved.
 
+## Discord chapter announcements
+
+Discord announcements run through the Vercel function at `api/discord-announcement.js`. The Discord webhook and Firebase Admin key must only be configured in Vercel; never add either secret to a `VITE_` variable or commit them to GitHub.
+
+1. Import this GitHub repository as a new Vercel project.
+2. In Vercel, open **Settings > Environment Variables** and add the variables listed in [vercel.env.example](./vercel.env.example). Copy the Firebase values from the service-account JSON downloaded from **Firebase Console > Project settings > Service accounts > Generate new private key**.
+3. Put the Discord channel webhook URL in `DISCORD_WEBHOOK_URL`. Keep `ALLOWED_ORIGINS` as origins only, without `/ulunavir-tales/` or another path.
+4. Deploy the Vercel project and confirm that `/api/discord-announcement` exists.
+5. In GitHub, open **Settings > Secrets and variables > Actions > Variables** and create `VITE_ANNOUNCEMENT_API_URL` with the full Vercel endpoint, for example `https://your-project.vercel.app/api/discord-announcement`.
+6. Run the GitHub Pages workflow again. The workflow provides the public API address and the GitHub Pages chapter URL to Vite during the build.
+
+When an editor saves a published chapter, the endpoint verifies the signed-in Firebase user and their edit permission before sending anything. A chapter's first successful published save is announced as a publication; later published saves are announced as updates. Existing published chapters are treated as already published so deploying this feature does not generate false first-publication announcements.
+
 ## Firestore rules
 
 Use [firestore.rules](./firestore.rules) as the starting point:

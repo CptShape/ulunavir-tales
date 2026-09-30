@@ -58,6 +58,47 @@ function getDisplayName(user = getUser()) {
   return user.penName?.trim() || user.name || "Creator";
 }
 
+function getPublicChapterUrl(storyId, arcId, chapterId) {
+  const configuredBase = getRuntimeConfig().publicAppUrl?.trim();
+  const runtimeBase = `${window.location.origin}${window.location.pathname}`;
+  const base = (configuredBase || runtimeBase).replace(/#.*$/, "").replace(/\/?$/, "/");
+  return `${base}#/stories/${encodeURIComponent(storyId)}/arcs/${encodeURIComponent(arcId)}/chapters/${encodeURIComponent(chapterId)}?view=browser`;
+}
+
+async function sendChapterAnnouncement({ storyId, arcId, chapterId }) {
+  const apiUrl = getRuntimeConfig().announcementApiUrl?.trim();
+  if (!apiUrl) {
+    return { skipped: true, reason: "Announcement API is not configured." };
+  }
+
+  const authUser = state.authClient?.auth?.currentUser;
+  if (!authUser?.getIdToken) {
+    throw new Error("A Firebase sign-in is required for Discord announcements.");
+  }
+
+  const token = await authUser.getIdToken();
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      storyId,
+      arcId,
+      chapterId,
+      chapterUrl: getPublicChapterUrl(storyId, arcId, chapterId),
+    }),
+  });
+
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Announcement request failed (${response.status}).`);
+  }
+
+  return result;
+}
+
 function getReaderSettings(user = getUser()) {
   const settings = user?.readerSettings ?? {};
   return {
@@ -1519,6 +1560,7 @@ async function getChapterEditorPatch(chapter, overrides = {}) {
     coverImageUrl,
     coverImageMode,
     published: document.querySelector("#chapter-published-input")?.checked ?? isChapterPublished(chapter),
+    hasEverBeenPublished: chapter.hasEverBeenPublished ?? isChapterPublished(chapter),
     dmNotes: document.querySelector("#chapter-dm-notes-input")?.value ?? chapter.dmNotes ?? "",
     renderMode: draft.renderMode,
     htmlBackground: draft.htmlBackground,
@@ -3887,8 +3929,27 @@ document.addEventListener("click", async (event) => {
   if (action === "save-chapter") {
     const chapterId = actionTarget.dataset.chapterId;
     const chapter = await state.adapter.getChapter(chapterId);
-    await state.adapter.updateChapter(chapterId, await getChapterEditorPatch(chapter));
+    const patch = await getChapterEditorPatch(chapter);
+    await state.adapter.updateChapter(chapterId, patch);
     state.saveStatus = "Chapter saved.";
+    if (patch.published) {
+      try {
+        const announcement = await sendChapterAnnouncement({
+          storyId: state.route.params.storyId,
+          arcId: state.route.params.arcId,
+          chapterId,
+        });
+        if (announcement.skipped) {
+          state.saveStatus = `Chapter saved. ${announcement.reason}`;
+        } else {
+          state.saveStatus = announcement.type === "published"
+            ? "Chapter saved and its first publication was announced on Discord."
+            : "Chapter saved and its update was announced on Discord.";
+        }
+      } catch (error) {
+        state.saveStatus = `Chapter saved, but Discord announcement failed: ${String(error.message || error)}`;
+      }
+    }
     return render();
   }
 

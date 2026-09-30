@@ -4,6 +4,8 @@ import { getFirestore } from "firebase/firestore";
 
 const DEFAULT_CONFIG = {
   mode: "local",
+  announcementApiUrl: "",
+  publicAppUrl: "",
   firebase: {
     apiKey: "",
     authDomain: "",
@@ -19,6 +21,8 @@ function getEnvConfig() {
 
   return {
     mode: env.VITE_APP_MODE ?? DEFAULT_CONFIG.mode,
+    announcementApiUrl: env.VITE_ANNOUNCEMENT_API_URL ?? "",
+    publicAppUrl: env.VITE_PUBLIC_APP_URL ?? "",
     firebase: {
       apiKey: env.VITE_FIREBASE_API_KEY ?? "",
       authDomain: env.VITE_FIREBASE_AUTH_DOMAIN ?? "",

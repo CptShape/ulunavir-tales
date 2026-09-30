@@ -1,4 +1,7 @@
 .env
+.env.local
+.env.*.local
+.vercel/
 serviceAccount*.json
 firebase-admin*.json
 *-firebase-adminsdk-*.json

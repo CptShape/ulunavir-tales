@@ -36,6 +36,9 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          VITE_ANNOUNCEMENT_API_URL: ${{ vars.VITE_ANNOUNCEMENT_API_URL }}
+          VITE_PUBLIC_APP_URL: https://cptshape.github.io/ulunavir-tales/
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
