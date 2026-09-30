@@ -450,18 +450,6 @@ a {
   justify-content: flex-start;
 }
 
-.view-toggle {
-  display: inline-flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.view-toggle .ghost-button.is-active {
-  background: linear-gradient(180deg, rgba(212, 172, 103, 0.32), rgba(110, 74, 32, 0.62));
-  border-color: rgba(255, 223, 164, 0.3);
-  color: var(--parchment);
-}
-
 .page-title,
 .split-header {
   justify-content: space-between;
@@ -474,7 +462,9 @@ a {
 .inline-form select,
 .editor-controls input,
 .editor-controls textarea,
-.editor-controls select {
+.editor-controls select,
+.chapter-cover-control input,
+.chapter-cover-control select {
   width: 100%;
   background:
     linear-gradient(180deg, rgba(247, 235, 210, 0.1), rgba(83, 60, 41, 0.24)),
@@ -530,10 +520,6 @@ textarea::placeholder {
   justify-content: start;
 }
 
-.nested-list.is-list-view {
-  grid-template-columns: 1fr;
-}
-
 .list-card {
   display: grid;
   gap: 16px;
@@ -547,13 +533,218 @@ textarea::placeholder {
   align-content: start;
 }
 
-.nested-list.is-list-view .list-card {
-  max-width: none;
-}
-
 .list-card h3,
 .list-card p {
   margin: 0;
+}
+
+.chapter-card-grid {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 360px));
+  gap: 18px;
+}
+
+.story-list,
+.arc-card-grid {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 360px));
+  gap: 18px;
+}
+
+.chapter-card {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr auto;
+  gap: 10px;
+  width: 100%;
+  max-width: 360px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(201, 169, 113, 0.34);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(185, 144, 73, 0.09), transparent 38%),
+    linear-gradient(180deg, rgba(45, 31, 23, 0.98), rgba(24, 17, 13, 0.98));
+  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 231, 187, 0.05);
+}
+
+.entity-card {
+  grid-template-rows: unset;
+  grid-auto-rows: auto;
+  align-content: start;
+}
+
+.entity-card-byline {
+  margin: -4px 0 0;
+}
+
+.entity-card-tags {
+  min-height: 34px;
+  align-content: start;
+}
+
+.entity-card-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.entity-card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 52px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(201, 169, 113, 0.14);
+}
+
+.entity-card .chapter-open-button {
+  margin-top: auto;
+}
+
+.chapter-cover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid rgba(201, 169, 113, 0.3);
+  border-radius: calc(var(--radius-lg) - 5px);
+  background: rgba(14, 10, 8, 0.82);
+}
+
+.chapter-cover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 -42px 54px rgba(8, 5, 4, 0.2);
+}
+
+.cover-card-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  text-transform: capitalize;
+  background: rgba(20, 14, 11, 0.86);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+}
+
+.chapter-cover img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.chapter-cover.cover-mode-fit img {
+  object-fit: contain;
+  background:
+    radial-gradient(circle at center, rgba(185, 144, 73, 0.1), transparent 46%),
+    rgba(12, 9, 8, 0.96);
+}
+
+.chapter-cover.cover-mode-stretch img {
+  object-fit: fill;
+}
+
+.chapter-cover-placeholder {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: rgba(225, 193, 119, 0.42);
+  font-size: 2.8rem;
+  background:
+    radial-gradient(circle at center, rgba(185, 144, 73, 0.18), transparent 32%),
+    repeating-linear-gradient(45deg, rgba(201, 169, 113, 0.025) 0 1px, transparent 1px 12px),
+    linear-gradient(135deg, rgba(58, 41, 29, 0.88), rgba(22, 16, 13, 0.96));
+}
+
+.chapter-lock {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(201, 169, 113, 0.34);
+  border-radius: 999px;
+  background: rgba(20, 14, 11, 0.84);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  font-size: 1.05rem;
+}
+
+.chapter-lock.is-published {
+  color: var(--gold-bright);
+}
+
+.chapter-lock.is-draft {
+  color: #ef7770;
+  border-color: rgba(239, 119, 112, 0.42);
+}
+
+.chapter-card-title,
+.chapter-card-date {
+  margin: 0;
+}
+
+.chapter-card-title {
+  color: var(--parchment);
+  font-size: 1.12rem;
+  line-height: 1.25;
+}
+
+.chapter-card-date {
+  font-size: 0.82rem;
+}
+
+.chapter-card-actions {
+  display: grid;
+  grid-template-columns: repeat(4, 42px);
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(201, 169, 113, 0.14);
+}
+
+.chapter-icon-button {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  padding: 0;
+  font-size: 1.05rem;
+}
+
+.chapter-open-button {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.chapter-cover-control {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid rgba(201, 169, 113, 0.18);
+  border-radius: var(--radius-md);
+  background: rgba(38, 27, 21, 0.44);
+}
+
+.chapter-cover-control > label {
+  color: var(--parchment);
+  font-weight: 700;
+}
+
+.entity-cover-control {
+  max-width: 760px;
 }
 
 .pill,
@@ -681,10 +872,6 @@ textarea::placeholder {
   font-weight: 700;
   padding: 0;
   white-space: nowrap;
-}
-
-.phase-select {
-  max-width: 260px;
 }
 
 .soundtrack-list {

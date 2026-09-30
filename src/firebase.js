@@ -1,5 +1,5 @@
 import { initializeApp, getApp, getApps } from "firebase/app";
-import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
+import { getAuth, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const DEFAULT_CONFIG = {
@@ -84,6 +84,13 @@ export function initializeFirebase() {
     signIn: async () => {
       const result = await signInWithPopup(auth, provider);
       return result.user;
+    },
+    signInWithRedirect: async () => {
+      await signInWithRedirect(auth, provider);
+    },
+    getRedirectUser: async () => {
+      const result = await getRedirectResult(auth);
+      return result?.user ?? null;
     },
     signOut: async () => signOut(auth),
     watchAuth: (callback) => onAuthStateChanged(auth, callback),

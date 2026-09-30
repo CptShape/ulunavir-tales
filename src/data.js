@@ -48,6 +48,8 @@ const starterState = {
     [demoStoryId]: {
       id: demoStoryId,
       title: "The Clockwork Harbor",
+      coverImageUrl: "",
+      coverImageMode: "fill",
       tags: ["fantasy", "mystery", "serial"],
       visibility: "public",
       creatorId: "demo-user",
@@ -66,6 +68,8 @@ const starterState = {
       id: demoArcId,
       storyId: demoStoryId,
       title: "Tide One",
+      coverImageUrl: "",
+      coverImageMode: "fill",
       chapterIds: [demoChapterId],
       soundtracks: [],
       phases: [
@@ -108,8 +112,18 @@ function deepClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizeCoverMode(value) {
+  return ["fit", "stretch"].includes(value) ? value : "fill";
+}
+
 function flattenPhaseChapterIds(phases) {
   return phases.flatMap((phase) => phase.chapterIds ?? []);
+}
+
+function swapItems(items, from, to) {
+  const next = [...items];
+  [next[from], next[to]] = [next[to], next[from]];
+  return next;
 }
 
 function buildDefaultPhase(chapterIds = []) {
@@ -121,9 +135,12 @@ function buildDefaultPhase(chapterIds = []) {
 }
 
 function normalizeChapter(chapter) {
+  const coverImageMode = normalizeCoverMode(chapter.coverImageMode);
   return {
     ...chapter,
     body: chapter.body ?? "",
+    coverImageUrl: chapter.coverImageUrl ?? "",
+    coverImageMode,
     published: chapter.published ?? true,
     dmNotes: chapter.dmNotes ?? "",
     comments: chapter.comments ?? [],
@@ -164,6 +181,8 @@ function ensureArcPhasesData(arc) {
   const orderedChapterIds = flattenPhaseChapterIds(existingPhases);
   return {
     ...arc,
+    coverImageUrl: arc.coverImageUrl ?? "",
+    coverImageMode: normalizeCoverMode(arc.coverImageMode),
     chapterIds: orderedChapterIds,
     soundtracks: arc.soundtracks ?? [],
     phases: existingPhases,
@@ -197,6 +216,8 @@ function normalizeStory(story, state) {
 
   return {
     ...story,
+    coverImageUrl: story.coverImageUrl ?? "",
+    coverImageMode: normalizeCoverMode(story.coverImageMode),
     pendingTransfer: story.pendingTransfer ?? null,
     pendingTransferEmailLower: story.pendingTransferEmailLower ?? "",
     pendingTransferStatus: story.pendingTransferStatus ?? "",
@@ -301,7 +322,7 @@ function createLocalAdapter() {
         .filter((story) => story.creatorId === userId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .map((story) => ({
-          ...story,
+          ...storySummary(story),
           arcs: (story.arcIds ?? []).map((arcId) => ({ id: arcId })),
         }));
     },
@@ -323,7 +344,7 @@ function createLocalAdapter() {
         .filter((story) => story.visibility === "public")
         .sort((a, b) => a.creatorName.localeCompare(b.creatorName) || a.title.localeCompare(b.title))
         .map((story) => ({
-          ...story,
+          ...storySummary(story),
           arcs: (story.arcIds ?? []).map((arcId) => ({ id: arcId })),
         }));
     },
@@ -360,6 +381,8 @@ function createLocalAdapter() {
       state.stories[id] = {
         id,
         title,
+        coverImageUrl: "",
+        coverImageMode: "fill",
         tags,
         visibility,
         creatorId,
@@ -522,6 +545,8 @@ function createLocalAdapter() {
         id,
         storyId,
         title,
+        coverImageUrl: "",
+        coverImageMode: "fill",
         chapterIds: [],
         soundtracks: [],
         phases: [buildDefaultPhase()],
@@ -541,6 +566,8 @@ function createLocalAdapter() {
       }
 
       arc.title = patch.title ?? arc.title;
+      arc.coverImageUrl = patch.coverImageUrl ?? arc.coverImageUrl ?? "";
+      arc.coverImageMode = normalizeCoverMode(patch.coverImageMode ?? arc.coverImageMode);
       arc.phases = patch.phases ?? arc.phases;
       arc.chapterIds = patch.chapterIds ?? arc.chapterIds;
       arc.soundtracks = patch.soundtracks ?? arc.soundtracks ?? [];
@@ -569,6 +596,8 @@ function createLocalAdapter() {
         arcId,
         title,
         body: "",
+        coverImageUrl: "",
+        coverImageMode: "fill",
         published: false,
         dmNotes: "",
         comments: [],
@@ -694,6 +723,53 @@ function createLocalAdapter() {
       arc.chapterIds = flattenPhaseChapterIds(arc.phases);
       arc.updatedAt = new Date().toISOString();
       state.stories[arc.storyId].updatedAt = arc.updatedAt;
+      saveLocalState(state);
+    },
+    async moveChapter(arcId, chapterId, direction) {
+      const state = loadLocalState();
+      ensureLocalArcMigration(state, arcId);
+      const arc = state.arcs[arcId];
+      if (!arc) {
+        throw new Error("Arc not found.");
+      }
+
+      const phases = arc.phases.map((phase) => ({
+        ...phase,
+        chapterIds: [...(phase.chapterIds ?? [])],
+      }));
+      const phaseIndex = phases.findIndex((phase) => phase.chapterIds.includes(chapterId));
+      if (phaseIndex < 0) {
+        throw new Error("Chapter phase not found.");
+      }
+
+      const chapterIndex = phases[phaseIndex].chapterIds.indexOf(chapterId);
+      if (direction === "up") {
+        if (chapterIndex > 0) {
+          phases[phaseIndex].chapterIds = swapItems(phases[phaseIndex].chapterIds, chapterIndex, chapterIndex - 1);
+        } else if (phaseIndex > 0) {
+          phases[phaseIndex].chapterIds.shift();
+          phases[phaseIndex - 1].chapterIds.push(chapterId);
+        } else {
+          return;
+        }
+      } else if (direction === "down") {
+        if (chapterIndex < phases[phaseIndex].chapterIds.length - 1) {
+          phases[phaseIndex].chapterIds = swapItems(phases[phaseIndex].chapterIds, chapterIndex, chapterIndex + 1);
+        } else if (phaseIndex < phases.length - 1) {
+          phases[phaseIndex].chapterIds.pop();
+          phases[phaseIndex + 1].chapterIds.unshift(chapterId);
+        } else {
+          return;
+        }
+      } else {
+        throw new Error("Unknown chapter move direction.");
+      }
+
+      const now = new Date().toISOString();
+      arc.phases = phases;
+      arc.chapterIds = flattenPhaseChapterIds(phases);
+      arc.updatedAt = now;
+      state.stories[arc.storyId].updatedAt = now;
       saveLocalState(state);
     },
     async transferChapter(chapterId, targetArcId, targetPhaseId) {
@@ -833,6 +909,8 @@ function createLocalAdapter() {
 function storySummary(story) {
   return {
     ...story,
+    coverImageUrl: story.coverImageUrl ?? "",
+    coverImageMode: normalizeCoverMode(story.coverImageMode),
     pendingTransfer: story.pendingTransfer ?? null,
     pendingTransferEmailLower: story.pendingTransferEmailLower ?? "",
     pendingTransferStatus: story.pendingTransferStatus ?? "",
@@ -885,7 +963,7 @@ async function fetchStoryBundle(db, storyId) {
   const chaptersByArcId = Object.fromEntries(chapterMaps);
 
   return {
-    ...story,
+    ...storySummary(story),
     tags: story.tags ?? [],
     arcIds: story.arcIds ?? [],
     arcs: arcs.map((arc) => ({
@@ -1062,6 +1140,8 @@ function createFirebaseAdapter(authClient) {
       const payload = {
         id,
         title,
+        coverImageUrl: "",
+        coverImageMode: "fill",
         tags,
         visibility,
         creatorId,
@@ -1206,6 +1286,8 @@ function createFirebaseAdapter(authClient) {
         id,
         storyId,
         title,
+        coverImageUrl: "",
+        coverImageMode: "fill",
         chapterIds: [],
         soundtracks: [],
         phases: [buildDefaultPhase()],
@@ -1259,6 +1341,8 @@ function createFirebaseAdapter(authClient) {
         arcId,
         title,
         body: "",
+        coverImageUrl: "",
+        coverImageMode: "fill",
         published: false,
         dmNotes: "",
         comments: [],
@@ -1429,6 +1513,57 @@ function createFirebaseAdapter(authClient) {
         throw new Error("Phase not found.");
       }
       target.chapterIds.push(chapterId);
+      const now = new Date().toISOString();
+      await updateDoc(arcRef, {
+        phases,
+        chapterIds: flattenPhaseChapterIds(phases),
+        updatedAt: now,
+      });
+      await updateDoc(doc(db, "stories", arc.storyId), {
+        updatedAt: now,
+      });
+    },
+    async moveChapter(arcId, chapterId, direction) {
+      const arcRef = doc(db, "arcs", arcId);
+      const arcSnapshot = await getDoc(arcRef);
+      const rawArc = applyDocId(arcSnapshot);
+      const arc = rawArc ? ensureArcPhasesData(rawArc) : null;
+      if (!arc) {
+        throw new Error("Arc not found.");
+      }
+
+      const phases = arc.phases.map((phase) => ({
+        ...phase,
+        chapterIds: [...(phase.chapterIds ?? [])],
+      }));
+      const phaseIndex = phases.findIndex((phase) => phase.chapterIds.includes(chapterId));
+      if (phaseIndex < 0) {
+        throw new Error("Chapter phase not found.");
+      }
+
+      const chapterIndex = phases[phaseIndex].chapterIds.indexOf(chapterId);
+      if (direction === "up") {
+        if (chapterIndex > 0) {
+          phases[phaseIndex].chapterIds = swapItems(phases[phaseIndex].chapterIds, chapterIndex, chapterIndex - 1);
+        } else if (phaseIndex > 0) {
+          phases[phaseIndex].chapterIds.shift();
+          phases[phaseIndex - 1].chapterIds.push(chapterId);
+        } else {
+          return;
+        }
+      } else if (direction === "down") {
+        if (chapterIndex < phases[phaseIndex].chapterIds.length - 1) {
+          phases[phaseIndex].chapterIds = swapItems(phases[phaseIndex].chapterIds, chapterIndex, chapterIndex + 1);
+        } else if (phaseIndex < phases.length - 1) {
+          phases[phaseIndex].chapterIds.pop();
+          phases[phaseIndex + 1].chapterIds.unshift(chapterId);
+        } else {
+          return;
+        }
+      } else {
+        throw new Error("Unknown chapter move direction.");
+      }
+
       const now = new Date().toISOString();
       await updateDoc(arcRef, {
         phases,

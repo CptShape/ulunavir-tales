@@ -11,6 +11,7 @@ const state = {
   dragActive: false,
   saveStatus: "",
   authError: "",
+  authErrorCode: "",
   loadError: "",
   soundtrack: {
     arcId: "",
@@ -55,10 +56,6 @@ function getDisplayName(user = getUser()) {
   }
 
   return user.penName?.trim() || user.name || "Creator";
-}
-
-function getStructureView(user = getUser()) {
-  return user?.structureView === "grid" ? "grid" : "list";
 }
 
 function getReaderSettings(user = getUser()) {
@@ -1507,6 +1504,28 @@ function getEditorChapterDraft() {
   };
 }
 
+async function getChapterEditorPatch(chapter, overrides = {}) {
+  const draft = getEditorChapterDraft();
+  const coverInput = document.querySelector("#chapter-cover-input");
+  const coverModeInput = document.querySelector("#chapter-cover-mode-input");
+  const rawCover = coverInput instanceof HTMLInputElement ? coverInput.value.trim() : (chapter.coverImageUrl ?? "");
+  const coverImageUrl = rawCover ? await normalizeExternalImageUrl(rawCover) : "";
+  const coverImageMode = coverModeInput instanceof HTMLSelectElement && ["fill", "fit", "stretch"].includes(coverModeInput.value)
+    ? coverModeInput.value
+    : (chapter.coverImageMode ?? "fill");
+  return {
+    title: document.querySelector("#chapter-title-input")?.value.trim() || chapter.title || "Untitled Chapter",
+    body: draft.body,
+    coverImageUrl,
+    coverImageMode,
+    published: document.querySelector("#chapter-published-input")?.checked ?? isChapterPublished(chapter),
+    dmNotes: document.querySelector("#chapter-dm-notes-input")?.value ?? chapter.dmNotes ?? "",
+    renderMode: draft.renderMode,
+    htmlBackground: draft.htmlBackground,
+    ...overrides,
+  };
+}
+
 function updateChapterPreviewFromEditor() {
   const preview = document.querySelector(".markdown-preview");
   if (!preview) {
@@ -1641,7 +1660,15 @@ function layout(content, activeTab, quickToolsContent = "") {
   const readerSettings = getReaderSettings(user);
   const readerStyle = `--reader-font-size:${readerSettings.fontSize}px;--reader-line-height:${readerSettings.lineHeight};--reader-width:${readerSettings.width}px;`;
   const authNotice = state.authError
-    ? `<div class="notice"><strong>Sign-in error</strong><div class="muted">${escapeHtml(state.authError)}</div></div>`
+    ? `
+        <div class="notice">
+          <strong>Sign-in error</strong>
+          <div class="muted">${escapeHtml(state.authError)}</div>
+          ${state.authErrorCode === "auth/invalid-credential" || state.authErrorCode === "auth/internal-error"
+            ? '<div class="card-actions"><button class="ghost-button" data-action="sign-in-redirect">Try redirect sign-in</button></div>'
+            : ""}
+        </div>
+      `
     : "";
   const loadNotice = state.loadError
     ? `<div class="notice"><strong>Load error</strong><div class="muted">${escapeHtml(state.loadError)}</div></div>`
@@ -2006,25 +2033,48 @@ async function renderCreator() {
   );
 }
 
-function renderStoryCard(story, options = {}) {
+function getCoverMode(item) {
+  return ["fit", "stretch"].includes(item?.coverImageMode) ? item.coverImageMode : "fill";
+}
+
+function renderCoverMedia(item, options = {}) {
+  const coverUrl = item?.coverImageUrl ? getDisplayImageUrl(item.coverImageUrl) : "";
+  const coverMode = getCoverMode(item);
+  const title = item?.title || options.fallbackTitle || "Untitled";
   return `
-    <article class="list-card">
-      <div class="split-header">
-        <div>
-          <h3>${escapeHtml(story.title)}</h3>
-          ${options.editorView ? `<p class="muted">by ${escapeHtml(story.creatorName)}</p>` : ""}
-          <p class="muted">Updated ${formatDate(story.updatedAt)}</p>
-        </div>
-        <span class="status-pill">${escapeHtml(story.visibility)}</span>
-      </div>
-      <div class="chip-row">
+    <div class="chapter-cover entity-cover cover-mode-${coverMode} ${coverUrl ? "has-cover" : "no-cover"}">
+      ${coverUrl
+        ? `<img src="${escapeHtml(coverUrl)}" alt="Cover for ${escapeHtml(title)}" />`
+        : `<div class="chapter-cover-placeholder" aria-hidden="true"><span>${options.placeholder ?? "✦"}</span></div>`}
+      ${options.badge ?? ""}
+    </div>
+  `;
+}
+
+function renderStoryCard(story, options = {}) {
+  const browserView = Boolean(options.browserView);
+  const storyUrl = `#/stories/${story.id}${browserView ? "?view=browser" : ""}`;
+  return `
+    <article class="chapter-card entity-card story-cover-card">
+      ${renderCoverMedia(story, {
+        placeholder: "◆",
+        badge: `<span class="status-pill cover-card-badge">${escapeHtml(story.visibility)}</span>`,
+      })}
+      <h3 class="chapter-card-title">${escapeHtml(story.title || "Untitled story")}</h3>
+      ${options.editorView || browserView ? `<p class="muted entity-card-byline">by ${escapeHtml(story.creatorName)}</p>` : ""}
+      <p class="muted chapter-card-date">Updated ${formatDate(story.updatedAt)}</p>
+      <div class="chip-row entity-card-tags">
         ${story.tags.map((tag) => `<span class="pill">${escapeHtml(tag)}</span>`).join("")}
       </div>
-      <div class="card-actions">
-        <a class="primary-button" href="#/stories/${story.id}">Open story</a>
+      <div class="entity-card-meta">
         <span class="pill">${story.arcs.length} arc(s)</span>
-        ${options.authorView ? `<button class="danger-button" data-action="delete-story" data-story-id="${story.id}">Delete</button>` : ""}
       </div>
+      ${options.authorView ? `
+        <div class="entity-card-actions" aria-label="Story actions">
+          <button class="small-button chapter-icon-button danger-icon" title="Delete story" aria-label="Delete story" data-action="delete-story" data-story-id="${story.id}">🗑</button>
+        </div>
+      ` : ""}
+      <a class="primary-button chapter-open-button" href="${storyUrl}"><span aria-hidden="true">&#128214;</span> ${browserView ? "Read Story" : "Open Story"}</a>
     </article>
   `;
 }
@@ -2093,21 +2143,7 @@ async function renderBrowser() {
 }
 
 function renderBrowserStoryCard(story) {
-  return `
-    <article class="list-card">
-      <div class="split-header">
-        <div>
-          <h3>${escapeHtml(story.title)}</h3>
-          <p class="muted">by ${escapeHtml(story.creatorName)}</p>
-        </div>
-        <span class="pill">${story.arcs.length} arc(s)</span>
-      </div>
-      <div class="chip-row">
-        ${story.tags.map((tag) => `<span class="pill">${escapeHtml(tag)}</span>`).join("")}
-      </div>
-      <a class="primary-button" href="#/stories/${story.id}?view=browser">Read structure</a>
-    </article>
-  `;
+  return renderStoryCard(story, { browserView: true });
 }
 
 function renderEditorChips(story, editable = false) {
@@ -2146,7 +2182,6 @@ async function renderStoryPage(storyId) {
   const owner = isOwner(story);
   const editable = canEditStory(story);
   const browserView = getRouteQuery().get("view") === "browser";
-  const structureView = getStructureView();
   const transferPanelOpen = getRouteQuery().get("transfer") === "1";
   const pendingTransfer = story.pendingTransferStatus === "pending" ? story.pendingTransfer : null;
   if (!canReadStory(story)) {
@@ -2166,10 +2201,6 @@ async function renderStoryPage(storyId) {
             <p class="muted">Set visibility, manage arcs, and organize the reading order.</p>
           </div>
           <div class="card-actions">
-            <div class="view-toggle" role="group" aria-label="Structure view">
-              <button class="ghost-button ${structureView === "grid" ? "is-active" : ""}" data-action="set-structure-view" data-view="grid">Compact Grid</button>
-              <button class="ghost-button ${structureView === "list" ? "is-active" : ""}" data-action="set-structure-view" data-view="list">List</button>
-            </div>
             ${browserView && editable ? '<a class="ghost-button" href="#/stories/' + story.id + '">Edit</a>' : ""}
             ${editable && !browserView ? '<button class="ghost-button" data-action="export-story" data-story-id="' + story.id + '">Export</button>' : ""}
             ${owner && !browserView ? '<button class="ghost-button" type="button" data-action="add-story-editor" data-story-id="' + story.id + '">Add an Editor</button>' : ""}
@@ -2186,6 +2217,18 @@ async function renderStoryPage(storyId) {
             </select>
             ${editable ? '<button class="ghost-button" data-action="save-story-settings" data-story-id="' + story.id + '">Save</button>' : ""}
           </div>
+          ${editable && !browserView ? `
+            <div class="chapter-cover-control entity-cover-control">
+              <label for="story-cover-input">Story cover image</label>
+              <input id="story-cover-input" value="${escapeHtml(story.coverImageUrl ?? "")}" placeholder="Paste an Imgur, Pixhost, or direct image URL" />
+              <label for="story-cover-mode-input">Cover placement</label>
+              <select id="story-cover-mode-input">
+                <option value="fill" ${getCoverMode(story) === "fill" ? "selected" : ""}>Fill — cover the full area, crop if needed</option>
+                <option value="fit" ${getCoverMode(story) === "fit" ? "selected" : ""}>Fit — show the complete image without cropping</option>
+                <option value="stretch" ${getCoverMode(story) === "stretch" ? "selected" : ""}>Stretch — resize the image to the exact card shape</option>
+              </select>
+            </div>
+          ` : ""}
           <div class="notice">
             <strong>${escapeHtml(story.creatorName)}</strong>
             <div class="muted">Created ${formatDate(story.createdAt)}. Visibility is currently ${escapeHtml(story.visibility)}.</div>
@@ -2221,7 +2264,7 @@ async function renderStoryPage(storyId) {
             </div>
           ` : ""}
         </section>
-        <section class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
+        <section class="nested-list arc-card-grid">
           ${story.arcs.length ? story.arcs.map((arc, index) => renderArcCard(arc, story, editable, index, browserView)).join("") : '<div class="empty-state">No arcs yet. Create the first arc to start structuring this story.</div>'}
         </section>
       </div>
@@ -2231,23 +2274,23 @@ async function renderStoryPage(storyId) {
 }
 
 function renderArcCard(arc, story, owner, index, browserView = false) {
+  const arcUrl = `#/stories/${story.id}/arcs/${arc.id}${browserView ? "?view=browser" : ""}`;
   return `
-    <article class="list-card">
-      <div class="split-header">
-        <div>
-          <h3>${escapeHtml(arc.title)}</h3>
-          <p class="muted">${arc.chapters.length} chapter(s)</p>
+    <article class="chapter-card entity-card arc-cover-card">
+      ${renderCoverMedia(arc, { placeholder: "◇" })}
+      <h3 class="chapter-card-title">${escapeHtml(arc.title || "Untitled arc")}</h3>
+      <p class="muted chapter-card-date">Updated ${formatDate(arc.updatedAt)}</p>
+      <div class="entity-card-meta">
+        <span class="pill">${arc.chapters.length} chapter(s)</span>
+      </div>
+      ${owner && !browserView ? `
+        <div class="entity-card-actions" aria-label="Arc actions">
+          <button class="small-button chapter-icon-button" title="Move arc up" aria-label="Move arc up" data-action="move-arc-up" data-story-id="${story.id}" data-index="${index}" ${index === 0 ? "disabled" : ""}>↑</button>
+          <button class="small-button chapter-icon-button" title="Move arc down" aria-label="Move arc down" data-action="move-arc-down" data-story-id="${story.id}" data-index="${index}" ${index === story.arcs.length - 1 ? "disabled" : ""}>↓</button>
+          <button class="small-button chapter-icon-button danger-icon" title="Delete arc" aria-label="Delete arc" data-action="delete-arc" data-story-id="${story.id}" data-arc-id="${arc.id}">🗑</button>
         </div>
-        ${owner ? `
-          <div class="order-buttons">
-            <button class="small-button" data-action="move-arc-up" data-story-id="${story.id}" data-index="${index}" ${index === 0 ? "disabled" : ""}>↑</button>
-            <button class="small-button" data-action="move-arc-down" data-story-id="${story.id}" data-index="${index}" ${index === story.arcs.length - 1 ? "disabled" : ""}>↓</button>
-          </div>` : ""}
-      </div>
-      <div class="card-actions">
-        <a class="primary-button" href="#/stories/${story.id}/arcs/${arc.id}${browserView ? "?view=browser" : ""}">Open arc</a>
-        ${owner && !browserView ? `<button class="danger-button" data-action="delete-arc" data-story-id="${story.id}" data-arc-id="${arc.id}">Delete</button>` : ""}
-      </div>
+      ` : ""}
+      <a class="primary-button chapter-open-button" href="${arcUrl}"><span aria-hidden="true">&#128214;</span> Open Arc</a>
     </article>
   `;
 }
@@ -2442,7 +2485,6 @@ async function renderArcPage(storyId, arcId) {
 
   const editable = canEditStory(story);
   const browserView = getRouteQuery().get("view") === "browser";
-  const structureView = getStructureView();
   if (!canReadStory(story)) {
     return renderMissing("This story is private.");
   }
@@ -2455,7 +2497,7 @@ async function renderArcPage(storyId, arcId) {
     return `
       <section class="phase-block stack">
         ${renderPhaseHeader(phase, editable, browserView, arc.id)}
-        <div class="nested-list ${structureView === "list" ? "is-list-view" : ""}">
+        <div class="nested-list chapter-card-grid">
           ${
             visibleChapters.length
               ? visibleChapters.map((chapter, index) => renderChapterCard(chapter, story, arc, editable, index, browserView, phase)).join("")
@@ -2480,20 +2522,26 @@ async function renderArcPage(storyId, arcId) {
             <p class="muted">Manage the chapter list and reading order for this arc.</p>
           </div>
           <div class="card-actions">
-            <div class="view-toggle" role="group" aria-label="Structure view">
-              <button class="ghost-button ${structureView === "grid" ? "is-active" : ""}" data-action="set-structure-view" data-view="grid">Compact Grid</button>
-              <button class="ghost-button ${structureView === "list" ? "is-active" : ""}" data-action="set-structure-view" data-view="list">List</button>
-            </div>
             ${browserView && editable ? '<a class="ghost-button" href="#/stories/' + story.id + '/arcs/' + arc.id + '">Edit</a>' : ""}
             ${editable && !browserView ? '<button class="ghost-button" data-action="create-phase" data-arc-id="' + arc.id + '">New phase</button>' : ""}
             ${editable && !browserView ? '<button class="primary-button" data-action="create-chapter" data-arc-id="' + arc.id + '" data-story-id="' + story.id + '">New chapter</button>' : ""}
           </div>
         </div>
         ${editable && !browserView ? `
-          <section class="panel">
+          <section class="panel stack">
             <div class="inline-form">
               <input id="arc-title-input" value="${escapeHtml(arc.title)}" />
-              <button class="ghost-button" data-action="save-arc-title" data-arc-id="${arc.id}" data-story-id="${story.id}">Rename arc</button>
+              <button class="ghost-button" data-action="save-arc-title" data-arc-id="${arc.id}" data-story-id="${story.id}">Save arc</button>
+            </div>
+            <div class="chapter-cover-control entity-cover-control">
+              <label for="arc-cover-input">Arc cover image</label>
+              <input id="arc-cover-input" value="${escapeHtml(arc.coverImageUrl ?? "")}" placeholder="Paste an Imgur, Pixhost, or direct image URL" />
+              <label for="arc-cover-mode-input">Cover placement</label>
+              <select id="arc-cover-mode-input">
+                <option value="fill" ${getCoverMode(arc) === "fill" ? "selected" : ""}>Fill — cover the full area, crop if needed</option>
+                <option value="fit" ${getCoverMode(arc) === "fit" ? "selected" : ""}>Fit — show the complete image without cropping</option>
+                <option value="stretch" ${getCoverMode(arc) === "stretch" ? "selected" : ""}>Stretch — resize the image to the exact card shape</option>
+              </select>
             </div>
         </section>` : ""}
         ${phaseSections || '<div class="empty-state">No chapters yet. Add one to begin writing.</div>'}
@@ -2515,31 +2563,33 @@ async function renderArcPage(storyId, arcId) {
 }
 
 function renderChapterCard(chapter, story, arc, owner, index, browserView = false, phase = null) {
+  const phases = arc.phases ?? [];
+  const phaseIndex = phases.findIndex((entry) => entry.id === phase?.id);
+  const isFirstInArc = phaseIndex <= 0 && index === 0;
+  const isLastInArc = phaseIndex === phases.length - 1 && index === (phase?.chapters?.length ?? 0) - 1;
+  const coverUrl = chapter.coverImageUrl ? getDisplayImageUrl(chapter.coverImageUrl) : "";
+  const coverImageMode = ["fit", "stretch"].includes(chapter.coverImageMode) ? chapter.coverImageMode : "fill";
+  const published = isChapterPublished(chapter);
+  const chapterUrl = `#/stories/${story.id}/arcs/${arc.id}/chapters/${chapter.id}${browserView ? "?view=browser" : ""}`;
   return `
-    <article class="list-card">
-      <div class="split-header">
-        <div>
-          <h3>${escapeHtml(chapter.title || "Untitled chapter")}</h3>
-          <p class="muted">Updated ${formatDate(chapter.updatedAt)}${!isChapterPublished(chapter) ? " · Draft" : ""}</p>
+    <article class="chapter-card">
+      <div class="chapter-cover cover-mode-${coverImageMode} ${coverUrl ? "has-cover" : "no-cover"}">
+        ${coverUrl
+          ? `<img src="${escapeHtml(coverUrl)}" alt="Cover for ${escapeHtml(chapter.title || "Untitled chapter")}" />`
+          : '<div class="chapter-cover-placeholder" aria-hidden="true"><span>✦</span></div>'}
+        <span class="chapter-lock ${published ? "is-published" : "is-draft"}" title="${published ? "Published" : "Draft"}" aria-label="${published ? "Published" : "Draft"}">${published ? "&#128275;" : "&#128274;"}</span>
+      </div>
+      <h3 class="chapter-card-title">${escapeHtml(chapter.title || "Untitled chapter")}</h3>
+      <p class="muted chapter-card-date">Updated ${formatDate(chapter.updatedAt)}</p>
+      ${owner && !browserView ? `
+        <div class="chapter-card-actions" aria-label="Chapter actions">
+          <button class="small-button chapter-icon-button" title="Move chapter up" aria-label="Move chapter up" data-action="move-chapter-up" data-arc-id="${arc.id}" data-chapter-id="${chapter.id}" ${isFirstInArc ? "disabled" : ""}>↑</button>
+          <button class="small-button chapter-icon-button" title="Move chapter down" aria-label="Move chapter down" data-action="move-chapter-down" data-arc-id="${arc.id}" data-chapter-id="${chapter.id}" ${isLastInArc ? "disabled" : ""}>↓</button>
+          <button class="small-button chapter-icon-button" title="Transfer chapter" aria-label="Transfer chapter" data-action="open-transfer-chapter" data-story-id="${story.id}" data-arc-id="${arc.id}" data-phase-id="${phase?.id ?? ""}" data-chapter-id="${chapter.id}">↗</button>
+          <button class="small-button chapter-icon-button danger-icon" title="Delete chapter" aria-label="Delete chapter" data-action="delete-chapter" data-story-id="${story.id}" data-arc-id="${arc.id}" data-chapter-id="${chapter.id}">🗑</button>
         </div>
-        ${owner && !browserView ? `
-          <div class="order-buttons">
-            <button class="small-button" data-action="move-chapter-up" data-arc-id="${arc.id}" data-phase-id="${phase?.id ?? ""}" data-index="${index}" ${index === 0 ? "disabled" : ""}>↑</button>
-            <button class="small-button" data-action="move-chapter-down" data-arc-id="${arc.id}" data-phase-id="${phase?.id ?? ""}" data-index="${index}" ${phase && index === phase.chapters.length - 1 ? "disabled" : ""}>↓</button>
-          </div>` : ""}
-      </div>
-      ${
-        owner && !browserView
-          ? `<select class="phase-select" data-action="move-chapter-phase" data-arc-id="${arc.id}" data-chapter-id="${chapter.id}">
-              ${(arc.phases ?? []).map((entry) => `<option value="${entry.id}" ${entry.id === phase?.id ? "selected" : ""}>${escapeHtml(entry.title)}</option>`).join("")}
-            </select>`
-          : ""
-      }
-      <div class="card-actions">
-        <a class="primary-button" href="#/stories/${story.id}/arcs/${arc.id}/chapters/${chapter.id}${browserView ? "?view=browser" : ""}">Open chapter</a>
-        ${owner && !browserView ? `<button class="small-button" title="Move chapter" data-action="open-transfer-chapter" data-story-id="${story.id}" data-arc-id="${arc.id}" data-phase-id="${phase?.id ?? ""}" data-chapter-id="${chapter.id}">↗</button>` : ""}
-        ${owner && !browserView ? `<button class="danger-button" data-action="delete-chapter" data-story-id="${story.id}" data-arc-id="${arc.id}" data-chapter-id="${chapter.id}">Delete</button>` : ""}
-      </div>
+      ` : ""}
+      <a class="primary-button chapter-open-button" href="${chapterUrl}"><span aria-hidden="true">&#128214;</span> Open Chapter</a>
     </article>
   `;
 }
@@ -2608,6 +2658,20 @@ async function renderChapterPage(storyId, arcId, chapterId) {
                 <input id="docx-import-input" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
               </div>
               <input id="chapter-title-input" value="${escapeHtml(chapter.title)}" ${editable ? "" : "disabled"} />
+              <div class="chapter-cover-control">
+                <label for="chapter-cover-input">Chapter cover image</label>
+                <div class="inline-form">
+                  <input id="chapter-cover-input" value="${escapeHtml(chapter.coverImageUrl ?? "")}" placeholder="Paste an Imgur, Pixhost, or direct image URL" />
+                  <button class="ghost-button" type="button" data-action="clear-chapter-cover" data-chapter-id="${chapter.id}">Clear cover</button>
+                </div>
+                <label for="chapter-cover-mode-input">Cover placement</label>
+                <select id="chapter-cover-mode-input">
+                  <option value="fill" ${(chapter.coverImageMode ?? "fill") === "fill" ? "selected" : ""}>Fill — cover the full area, crop if needed</option>
+                  <option value="fit" ${chapter.coverImageMode === "fit" ? "selected" : ""}>Fit — show the complete image without cropping</option>
+                  <option value="stretch" ${chapter.coverImageMode === "stretch" ? "selected" : ""}>Stretch — resize the image to the exact card shape</option>
+                </select>
+                <span class="muted">Paste a URL here, or use the cover button on one of the referenced images below.</span>
+              </div>
               <div class="inline-form">
                 <label class="toggle-row">
                   <input id="chapter-published-input" type="checkbox" ${isChapterPublished(chapter) ? "checked" : ""} />
@@ -2714,6 +2778,7 @@ function renderAssetItem(asset, index = 0, options = {}) {
   const actions = options.editable
     ? `
         <div class="asset-actions">
+          <button class="small-button asset-action-button" type="button" title="Use as chapter cover" aria-label="Use as chapter cover" data-action="set-chapter-cover" data-chapter-id="${options.chapterId}" data-cover-url="${escapeHtml(displayUrl)}">▣</button>
           <button class="small-button asset-action-button" type="button" title="Copy markdown" data-action="copy-asset-markdown" data-markdown="${escapeHtml(markdown)}">⧉</button>
           <button class="small-button asset-action-button danger-icon" type="button" title="Remove image" data-action="delete-asset" data-chapter-id="${options.chapterId}" data-asset-index="${index}">🗑</button>
         </div>
@@ -2806,7 +2871,16 @@ async function safeRender() {
   }
 }
 
-function readStoryFormValues() {
+async function readCoverFormValues(urlInputId, modeInputId, current = {}) {
+  const rawUrl = document.querySelector(`#${urlInputId}`)?.value.trim() ?? current.coverImageUrl ?? "";
+  const requestedMode = document.querySelector(`#${modeInputId}`)?.value ?? current.coverImageMode ?? "fill";
+  return {
+    coverImageUrl: rawUrl ? await normalizeExternalImageUrl(rawUrl) : "",
+    coverImageMode: ["fit", "stretch"].includes(requestedMode) ? requestedMode : "fill",
+  };
+}
+
+async function readStoryFormValues(story) {
   return {
     title: document.querySelector("#story-title-input")?.value.trim() ?? "",
     tags: (document.querySelector("#story-tags-input")?.value ?? "")
@@ -2814,6 +2888,7 @@ function readStoryFormValues() {
       .map((entry) => entry.trim())
       .filter(Boolean),
     visibility: document.querySelector("#story-visibility-input")?.value ?? "private",
+    ...await readCoverFormValues("story-cover-input", "story-cover-mode-input", story),
   };
 }
 
@@ -2941,6 +3016,7 @@ async function showLoginModal() {
     persistSession(null);
     state.saveStatus = "Signed out.";
     state.authError = "";
+    state.authErrorCode = "";
     return render();
   }
 
@@ -2955,12 +3031,14 @@ async function showLoginModal() {
         structureView: "list",
       });
       state.authError = "";
+      state.authErrorCode = "";
       state.saveStatus = "Signed in with Firebase.";
       return render();
     } catch (error) {
       console.error("Firebase sign-in failed:", error);
       state.saveStatus = "";
       state.authError = formatAuthError(error);
+      state.authErrorCode = error?.code ? String(error.code) : "";
       return render();
     }
   }
@@ -2997,6 +3075,7 @@ async function showLoginModal() {
     modal.remove();
     state.saveStatus = "Signed in with a local demo profile.";
     state.authError = "";
+    state.authErrorCode = "";
     render();
   });
 }
@@ -3446,6 +3525,14 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "sign-in-redirect") {
+    state.saveStatus = "Opening full-page Google sign-in...";
+    state.authError = "";
+    state.authErrorCode = "";
+    await state.authClient.signInWithRedirect?.();
+    return render();
+  }
+
   if (action === "play-music-cue") {
     const trackId = actionTarget.dataset.musicTrigger;
     if (trackId) {
@@ -3460,36 +3547,6 @@ document.addEventListener("click", async (event) => {
 
   if (action === "open-settings") {
     return navigate("/settings");
-  }
-
-  if (action === "set-structure-view") {
-    const user = getUser();
-    const structureView = actionTarget.dataset.view === "list" ? "list" : "grid";
-
-    if (!user?.id) {
-      persistSession({
-        ...user,
-        structureView,
-      });
-      return render();
-    }
-
-    const profile = await state.adapter.updateUserProfile(user.id, {
-      name: user.name,
-      email: user.email,
-      penName: user.penName ?? "",
-      structureView,
-      readerSettings: user.readerSettings ?? getReaderSettings(user),
-    });
-    persistSession({
-      ...user,
-      structureView: profile.structureView ?? structureView,
-      penName: profile.penName ?? user.penName ?? "",
-      name: profile.name ?? user.name,
-      email: profile.email ?? user.email,
-      readerSettings: profile.readerSettings ?? user.readerSettings ?? getReaderSettings(user),
-    });
-    return render();
   }
 
   if (action === "apply-story-filters") {
@@ -3522,7 +3579,8 @@ document.addEventListener("click", async (event) => {
 
   if (action === "save-story-settings") {
     const storyId = actionTarget.dataset.storyId;
-    const values = readStoryFormValues();
+    const story = await state.adapter.getStory(storyId);
+    const values = await readStoryFormValues(story);
     await state.adapter.updateStory(storyId, values);
     state.saveStatus = "Story details saved.";
     return render();
@@ -3665,10 +3723,12 @@ document.addEventListener("click", async (event) => {
   }
 
   if (action === "save-arc-title") {
+    const arc = await state.adapter.getArc(actionTarget.dataset.arcId);
     await state.adapter.updateArc(actionTarget.dataset.arcId, {
       title: document.querySelector("#arc-title-input").value.trim() || "Untitled Arc",
+      ...await readCoverFormValues("arc-cover-input", "arc-cover-mode-input", arc),
     });
-    state.saveStatus = "Arc title saved.";
+    state.saveStatus = "Arc details saved.";
     return render();
   }
 
@@ -3816,29 +3876,28 @@ document.addEventListener("click", async (event) => {
   }
 
   if (action === "move-chapter-up" || action === "move-chapter-down") {
-    const arc = await state.adapter.getArc(actionTarget.dataset.arcId);
-    const phase = (arc.phases ?? []).find((entry) => entry.id === actionTarget.dataset.phaseId);
-    if (!phase) {
-      return;
-    }
-    const index = Number(actionTarget.dataset.index);
-    const delta = action === "move-chapter-up" ? -1 : 1;
-    await state.adapter.reorderPhaseChapters(arc.id, phase.id, swap(phase.chapterIds, index, index + delta));
+    await state.adapter.moveChapter(
+      actionTarget.dataset.arcId,
+      actionTarget.dataset.chapterId,
+      action === "move-chapter-up" ? "up" : "down",
+    );
     return render();
   }
 
   if (action === "save-chapter") {
     const chapterId = actionTarget.dataset.chapterId;
-    const draft = getEditorChapterDraft();
-    await state.adapter.updateChapter(chapterId, {
-      title: document.querySelector("#chapter-title-input").value.trim() || "Untitled Chapter",
-      body: draft.body,
-      published: document.querySelector("#chapter-published-input")?.checked ?? false,
-      dmNotes: document.querySelector("#chapter-dm-notes-input")?.value ?? "",
-      renderMode: draft.renderMode,
-      htmlBackground: draft.htmlBackground,
-    });
+    const chapter = await state.adapter.getChapter(chapterId);
+    await state.adapter.updateChapter(chapterId, await getChapterEditorPatch(chapter));
     state.saveStatus = "Chapter saved.";
+    return render();
+  }
+
+  if (action === "set-chapter-cover" || action === "clear-chapter-cover") {
+    const chapterId = actionTarget.dataset.chapterId;
+    const chapter = await state.adapter.getChapter(chapterId);
+    const coverImageUrl = action === "set-chapter-cover" ? actionTarget.dataset.coverUrl : "";
+    await state.adapter.updateChapter(chapterId, await getChapterEditorPatch(chapter, { coverImageUrl }));
+    state.saveStatus = coverImageUrl ? "Chapter cover updated." : "Chapter cover cleared.";
     return render();
   }
 
@@ -4094,15 +4153,6 @@ document.addEventListener("change", async (event) => {
     return;
   }
 
-  if (!(target instanceof HTMLSelectElement)) {
-    return;
-  }
-
-  if (target.dataset.action === "move-chapter-phase") {
-    await state.adapter.moveChapterToPhase(target.dataset.arcId, target.dataset.chapterId, target.value);
-    state.saveStatus = "Chapter moved to another phase.";
-    return render();
-  }
 });
 
 document.addEventListener("input", (event) => {
@@ -4235,6 +4285,25 @@ async function bootstrap() {
   state.adapter = await createDataAdapter(authClient);
 
   if (state.authClient.mode === "firebase") {
+    try {
+      const redirectUser = await state.authClient.getRedirectUser?.();
+      if (redirectUser) {
+        persistSession({
+          id: redirectUser.uid,
+          name: redirectUser.displayName || redirectUser.email || "Creator",
+          email: redirectUser.email,
+          mode: "firebase",
+        });
+        state.authError = "";
+        state.authErrorCode = "";
+        state.saveStatus = "Signed in with Firebase.";
+      }
+    } catch (error) {
+      console.error("Firebase redirect sign-in failed:", error);
+      state.authError = formatAuthError(error);
+      state.authErrorCode = error?.code ? String(error.code) : "";
+    }
+
     state.authClient.watchAuth((user) => {
       if (!user) {
         persistSession(null);
