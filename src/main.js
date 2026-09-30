@@ -99,6 +99,51 @@ async function sendChapterAnnouncement({ storyId, arcId, chapterId }) {
   return result;
 }
 
+function getBackendApiUrl(endpointName) {
+  const announcementApiUrl = getRuntimeConfig().announcementApiUrl?.trim();
+  if (!announcementApiUrl) {
+    return "";
+  }
+
+  const url = new URL(announcementApiUrl, window.location.href);
+  url.pathname = `/api/${endpointName}`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+async function sendChapterEngagement(action, payload) {
+  const apiUrl = getBackendApiUrl("chapter-engagement");
+  if (!apiUrl) {
+    throw new Error("Chapter engagement API is not configured.");
+  }
+
+  const authUser = state.authClient?.auth?.currentUser;
+  if (!authUser?.getIdToken) {
+    throw new Error("A Firebase sign-in is required for comments and reactions.");
+  }
+
+  const token = await authUser.getIdToken();
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      action,
+      storyId: state.route.params.storyId,
+      arcId: state.route.params.arcId,
+      ...payload,
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Chapter engagement request failed (${response.status}).`);
+  }
+  return result;
+}
+
 function getReaderSettings(user = getUser()) {
   const settings = user?.readerSettings ?? {};
   return {
@@ -2456,13 +2501,21 @@ function renderChapterEngagementPanel(chapter, editable = false) {
         }).join("")}
       </div>
       <div class="comment-list">
-        ${comments.length ? comments.map((comment) => `
-          <article class="notice">
-            <strong>${escapeHtml(comment.userName ?? "Reader")}</strong>
-            <div class="muted">${formatDate(comment.createdAt)}</div>
-            <p>${escapeHtml(comment.body ?? "")}</p>
-          </article>
-        `).join("") : '<div class="empty-state">No comments yet.</div>'}
+        ${comments.length ? comments.map((comment, index) => {
+          const canDelete = Boolean(user?.id && (editable || comment.userId === user.id));
+          return `
+            <article class="notice">
+              <div class="comment-header">
+                <div>
+                  <strong>${escapeHtml(comment.userName ?? "Reader")}</strong>
+                  <div class="muted">${formatDate(comment.createdAt)}</div>
+                </div>
+                ${canDelete ? `<button class="small-button danger-icon" type="button" title="Delete comment" aria-label="Delete comment" data-action="delete-comment" data-chapter-id="${chapter.id}" data-comment-id="${escapeHtml(comment.id ?? "")}" data-comment-index="${index}">🗑</button>` : ""}
+              </div>
+              <p>${escapeHtml(comment.body ?? "")}</p>
+            </article>
+          `;
+        }).join("") : '<div class="empty-state">No comments yet.</div>'}
       </div>
       ${user ? `
         <div class="inline-form">
@@ -4052,18 +4105,27 @@ document.addEventListener("click", async (event) => {
       return render();
     }
     const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
-    await (state.adapter.updateChapterEngagement ?? state.adapter.updateChapter)(chapter.id, {
-      comments: [
-        ...(chapter.comments ?? []),
-        {
-          id: makeClientId("comment"),
-          userId: user.id,
-          userName: getDisplayName(user),
-          body,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    });
+    try {
+      if (state.authClient?.mode === "firebase") {
+        await sendChapterEngagement("add-comment", { chapterId: chapter.id, commentBody: body });
+      } else {
+        await (state.adapter.updateChapterEngagement ?? state.adapter.updateChapter)(chapter.id, {
+          comments: [
+            ...(chapter.comments ?? []),
+            {
+              id: makeClientId("comment"),
+              userId: user.id,
+              userName: getDisplayName(user),
+              body,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        });
+      }
+    } catch (error) {
+      state.saveStatus = `Comment failed: ${String(error.message || error)}`;
+      return render();
+    }
     state.saveStatus = "Comment added.";
     return render();
   }
@@ -4076,16 +4138,71 @@ document.addEventListener("click", async (event) => {
     }
     const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
     const emoji = actionTarget.dataset.emoji;
-    const reactions = { ...(chapter.reactions ?? {}) };
-    const users = new Set(reactions[emoji] ?? []);
-    if (users.has(user.id)) {
-      users.delete(user.id);
-    } else {
-      users.add(user.id);
+    try {
+      if (state.authClient?.mode === "firebase") {
+        await sendChapterEngagement("toggle-reaction", { chapterId: chapter.id, emoji });
+      } else {
+        const reactions = { ...(chapter.reactions ?? {}) };
+        const users = new Set(reactions[emoji] ?? []);
+        if (users.has(user.id)) {
+          users.delete(user.id);
+        } else {
+          users.add(user.id);
+        }
+        reactions[emoji] = [...users];
+        await (state.adapter.updateChapterEngagement ?? state.adapter.updateChapter)(chapter.id, { reactions });
+      }
+    } catch (error) {
+      state.saveStatus = `Reaction failed: ${String(error.message || error)}`;
+      return render();
     }
-    reactions[emoji] = [...users];
-    await (state.adapter.updateChapterEngagement ?? state.adapter.updateChapter)(chapter.id, { reactions });
     state.saveStatus = "Reaction updated.";
+    return render();
+  }
+
+  if (action === "delete-comment") {
+    const user = getUser();
+    if (!user) {
+      state.saveStatus = "Sign in to delete a comment.";
+      return render();
+    }
+
+    const [chapter, story] = await Promise.all([
+      state.adapter.getChapter(actionTarget.dataset.chapterId),
+      state.adapter.getStory(state.route.params.storyId),
+    ]);
+    const comments = [...(chapter.comments ?? [])];
+    const commentId = actionTarget.dataset.commentId;
+    const fallbackIndex = Number(actionTarget.dataset.commentIndex);
+    const commentIndex = commentId
+      ? comments.findIndex((comment) => comment.id === commentId)
+      : fallbackIndex;
+    const comment = comments[commentIndex];
+    if (!comment) {
+      state.saveStatus = "Comment not found.";
+      return render();
+    }
+    if (comment.userId !== user.id && !canEditStory(story)) {
+      state.saveStatus = "Only the commenter or a story editor can delete this comment.";
+      return render();
+    }
+
+    try {
+      if (state.authClient?.mode === "firebase") {
+        await sendChapterEngagement("delete-comment", {
+          chapterId: chapter.id,
+          commentId,
+          commentIndex,
+        });
+      } else {
+        comments.splice(commentIndex, 1);
+        await (state.adapter.updateChapterEngagement ?? state.adapter.updateChapter)(chapter.id, { comments });
+      }
+    } catch (error) {
+      state.saveStatus = `Comment deletion failed: ${String(error.message || error)}`;
+      return render();
+    }
+    state.saveStatus = "Comment deleted.";
     return render();
   }
 
