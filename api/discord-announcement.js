@@ -1,6 +1,15 @@
-import { cert, getApps, initializeApp } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-import { FieldValue, getFirestore } from "firebase-admin/firestore";
+let firebaseAdminPromise;
+
+function getFirebaseAdmin() {
+  if (!firebaseAdminPromise) {
+    firebaseAdminPromise = Promise.all([
+      import("firebase-admin/app"),
+      import("firebase-admin/auth"),
+      import("firebase-admin/firestore"),
+    ]).then(([app, auth, firestore]) => ({ ...app, ...auth, ...firestore }));
+  }
+  return firebaseAdminPromise;
+}
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -25,21 +34,29 @@ function getAllowedOrigins() {
     .filter(Boolean);
 }
 
-function applyCors(req, res) {
-  const origin = String(req.headers.origin ?? "").replace(/\/$/, "");
+function getCorsState(request) {
+  const origin = String(request.headers.get("origin") ?? "").replace(/\/$/, "");
   const allowedOrigins = getAllowedOrigins();
   const allowed = !origin || !allowedOrigins.length || allowedOrigins.includes(origin);
+  const headers = new Headers({
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+  });
 
   if (origin && allowed) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
+    headers.set("Access-Control-Allow-Origin", origin);
+    headers.set("Vary", "Origin");
   } else if (!allowedOrigins.length) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    headers.set("Access-Control-Allow-Origin", "*");
   }
 
-  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  return allowed;
+  return { allowed, headers };
+}
+
+function jsonResponse(status, body, headers) {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set("Content-Type", "application/json; charset=utf-8");
+  return new Response(JSON.stringify(body), { status, headers: responseHeaders });
 }
 
 function getServiceAccount() {
@@ -57,7 +74,8 @@ function getServiceAccount() {
   return { projectId, clientEmail, privateKey };
 }
 
-function getAdminApp() {
+async function getAdminApp() {
+  const { cert, getApps, initializeApp } = await getFirebaseAdmin();
   if (getApps().length) {
     return getApps()[0];
   }
@@ -69,12 +87,9 @@ function getAdminApp() {
   });
 }
 
-function parseRequestBody(req) {
+async function parseRequestBody(request) {
   try {
-    if (typeof req.body === "string") {
-      return JSON.parse(req.body || "{}");
-    }
-    return req.body ?? {};
+    return await request.json();
   } catch {
     throw new HttpError(400, "Request body must be valid JSON.");
   }
@@ -153,33 +168,34 @@ async function sendDiscordWebhook({ message, chapterUrl, chapterTitle, coverImag
   }
 }
 
-export default async function handler(req, res) {
-  const originAllowed = applyCors(req, res);
-  if (req.method === "OPTIONS") {
-    return res.status(originAllowed ? 204 : 403).end();
+async function handleRequest(request) {
+  const cors = getCorsState(request);
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: cors.allowed ? 204 : 403, headers: cors.headers });
   }
-  if (!originAllowed) {
-    return res.status(403).json({ error: "This site origin is not allowed." });
+  if (!cors.allowed) {
+    return jsonResponse(403, { error: "This site origin is not allowed." }, cors.headers);
   }
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Use POST for Discord announcements." });
+  if (request.method !== "POST") {
+    return jsonResponse(405, { error: "Use POST for Discord announcements." }, cors.headers);
   }
 
   try {
-    const authorization = String(req.headers.authorization ?? "");
+    const authorization = String(request.headers.get("authorization") ?? "");
     const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
     if (!token) {
-      return res.status(401).json({ error: "Firebase sign-in token is missing." });
+      return jsonResponse(401, { error: "Firebase sign-in token is missing." }, cors.headers);
     }
 
-    const app = getAdminApp();
+    const { FieldValue, getAuth, getFirestore } = await getFirebaseAdmin();
+    const app = await getAdminApp();
     let decodedToken;
     try {
       decodedToken = await getAuth(app).verifyIdToken(token);
     } catch {
       throw new HttpError(401, "Firebase sign-in token is invalid or expired.");
     }
-    const body = parseRequestBody(req);
+    const body = await parseRequestBody(request);
     const storyId = requireId(body.storyId, "Story ID");
     const arcId = requireId(body.arcId, "Arc ID");
     const chapterId = requireId(body.chapterId, "Chapter ID");
@@ -196,24 +212,24 @@ export default async function handler(req, res) {
     ]);
 
     if (!storySnapshot.exists || !arcSnapshot.exists || !chapterSnapshot.exists) {
-      return res.status(404).json({ error: "Story, arc, or chapter was not found." });
+      return jsonResponse(404, { error: "Story, arc, or chapter was not found." }, cors.headers);
     }
 
     const story = storySnapshot.data();
     const arc = arcSnapshot.data();
     const chapter = chapterSnapshot.data();
     if (arc.storyId !== storyId || chapter.arcId !== arcId) {
-      return res.status(409).json({ error: "Story hierarchy does not match this chapter." });
+      return jsonResponse(409, { error: "Story hierarchy does not match this chapter." }, cors.headers);
     }
 
     const tokenEmail = normalizeEmail(decodedToken.email);
     const editorEmails = (story.editorEmails ?? []).map(normalizeEmail);
     const canEdit = story.creatorId === decodedToken.uid || (tokenEmail && editorEmails.includes(tokenEmail));
     if (!canEdit) {
-      return res.status(403).json({ error: "You do not have permission to announce this chapter." });
+      return jsonResponse(403, { error: "You do not have permission to announce this chapter." }, cors.headers);
     }
     if (chapter.published !== true) {
-      return res.status(409).json({ error: "Only published chapters can be announced." });
+      return jsonResponse(409, { error: "Only published chapters can be announced." }, cors.headers);
     }
 
     const phase = (arc.phases ?? []).find((entry) => (entry.chapterIds ?? []).includes(chapterId));
@@ -251,10 +267,14 @@ export default async function handler(req, res) {
       lastAnnouncementType: type,
     });
 
-    return res.status(200).json({ ok: true, type });
+    return jsonResponse(200, { ok: true, type }, cors.headers);
   } catch (error) {
     console.error("Discord announcement failed:", error);
     const status = Number.isInteger(error?.status) ? error.status : 500;
-    return res.status(status).json({ error: error?.message || "Discord announcement failed." });
+    return jsonResponse(status, { error: error?.message || "Discord announcement failed." }, cors.headers);
   }
 }
+
+export default {
+  fetch: handleRequest,
+};
