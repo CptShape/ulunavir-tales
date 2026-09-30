@@ -129,7 +129,7 @@ function getImageUrl(value) {
   }
 }
 
-async function sendDiscordWebhook({ message, chapterUrl, chapterTitle, coverImageUrl, type }) {
+async function sendDiscordWebhook({ message, chapterUrl, coverImageUrl, type }) {
   const configuredWebhook = String(process.env.DISCORD_WEBHOOK_URL ?? "").trim();
   if (!configuredWebhook) {
     throw new Error("DISCORD_WEBHOOK_URL is not configured.");
@@ -142,9 +142,7 @@ async function sendDiscordWebhook({ message, chapterUrl, chapterTitle, coverImag
   webhookUrl.searchParams.set("wait", "true");
 
   const embed = {
-    title: compactText(chapterTitle, 256),
-    url: chapterUrl,
-    description: compactText(message, 4096),
+    description: `${message}\n\n[Chapter'ı oku](${chapterUrl})`,
     color: type === "published" ? 0xd9ad5b : 0x8e7148,
     timestamp: new Date().toISOString(),
   };
@@ -156,7 +154,6 @@ async function sendDiscordWebhook({ message, chapterUrl, chapterTitle, coverImag
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      content: `${message}\n${chapterUrl}`,
       embeds: [embed],
       allowed_mentions: { parse: [] },
     }),
@@ -245,7 +242,13 @@ async function handleRequest(request) {
     const firstPublication = chapter.hasEverBeenPublished !== true;
     const type = firstPublication ? "published" : "updated";
     const verb = firstPublication ? "yayınlanmıştır" : "güncellenmiştir";
-    const message = `“${storyTitle}” hikayesinde, “${arcTitle}” arc'ında, “${phaseTitle}” phase'inde, “${chapterTitle}” chapterı, ${actorName} tarafından ${verb}.`;
+    const message = [
+      `"${storyTitle}" hikayesinde`,
+      `"${arcTitle}" arc'ında`,
+      `"${phaseTitle}" phase'inde`,
+      `"${chapterTitle}" chapter'ı`,
+      `${actorName} tarafından ${verb}.`,
+    ].join("\n");
     const chapterUrl = getChapterUrl({
       storyId,
       arcId,
@@ -256,7 +259,6 @@ async function handleRequest(request) {
     await sendDiscordWebhook({
       message,
       chapterUrl,
-      chapterTitle,
       coverImageUrl: getImageUrl(chapter.coverImageUrl),
       type,
     });
