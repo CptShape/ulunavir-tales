@@ -137,6 +137,16 @@ function buildDefaultPhase(chapterIds = []) {
 function normalizeChapter(chapter) {
   const coverImageMode = normalizeCoverMode(chapter.coverImageMode);
   const hasEverBeenPublished = chapter.hasEverBeenPublished ?? chapter.published === true;
+  const audioSettings = chapter.audioSettings ?? {};
+  const normalizeAudioVolume = (value, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : fallback;
+  };
+  const normalizeTrackMultiplier = (value) => {
+    if (value === undefined || value === null || value === "") return 100;
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.min(200, number)) : 100;
+  };
   return {
     ...chapter,
     body: chapter.body ?? "",
@@ -148,7 +158,17 @@ function normalizeChapter(chapter) {
     comments: chapter.comments ?? [],
     reactions: chapter.reactions ?? {},
     assets: chapter.assets ?? [],
-    soundtracks: chapter.soundtracks ?? [],
+    soundtracks: (chapter.soundtracks ?? []).map((track) => ({
+      ...track,
+      trackType: ["soundtrack", "ambience", "sound-effect"].includes(track.trackType) ? track.trackType : "soundtrack",
+      volumeMultiplier: normalizeTrackMultiplier(track.volumeMultiplier),
+    })),
+    audioSettings: {
+      masterVolume: normalizeAudioVolume(audioSettings.masterVolume, 100),
+      soundtrackVolume: normalizeAudioVolume(audioSettings.soundtrackVolume, 70),
+      ambienceVolume: normalizeAudioVolume(audioSettings.ambienceVolume, 70),
+      soundEffectVolume: normalizeAudioVolume(audioSettings.soundEffectVolume, 85),
+    },
     videos: chapter.videos ?? [],
     renderMode: chapter.renderMode ?? "markdown",
     htmlBackground: chapter.htmlBackground ?? "",
@@ -609,6 +629,12 @@ function createLocalAdapter() {
         htmlBackground: "",
         assets: [],
         soundtracks: [],
+        audioSettings: {
+          masterVolume: 100,
+          soundtrackVolume: 70,
+          ambienceVolume: 70,
+          soundEffectVolume: 85,
+        },
         videos: [],
         createdAt: now,
         updatedAt: now,
@@ -1355,6 +1381,12 @@ function createFirebaseAdapter(authClient) {
         htmlBackground: "",
         assets: [],
         soundtracks: [],
+        audioSettings: {
+          masterVolume: 100,
+          soundtrackVolume: 70,
+          ambienceVolume: 70,
+          soundEffectVolume: 85,
+        },
         videos: [],
         createdAt: now,
         updatedAt: now,

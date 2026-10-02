@@ -3,6 +3,40 @@ import { getRuntimeConfig, initializeFirebase } from "./firebase.js";
 
 const appRoot = document.querySelector("#app");
 
+const AUDIO_CHANNEL_CONFIG = {
+  soundtrack: { label: "Soundtrack", shortLabel: "Music", loop: true, autoCue: true },
+  ambience: { label: "Ambience", shortLabel: "Ambience", loop: true, autoCue: true },
+  "sound-effect": { label: "Sound Effect", shortLabel: "Effect", loop: false, autoCue: false },
+};
+
+function createAudioChannelState(type) {
+  return {
+    type,
+    currentIndex: 0,
+    paused: true,
+    volume: type === "sound-effect" ? 85 : 70,
+    mode: "idle",
+    ready: false,
+    activeKey: "",
+    youtubePlayer: null,
+    youtubePlayerHost: "",
+    standbyPlayer: null,
+    standbyPlayerHost: "",
+    standbyTrackId: "",
+    standbyStartSeconds: 0,
+    standbyReady: false,
+    standbyWarming: false,
+    standbyToken: 0,
+    standbyPauseTimer: null,
+    currentCueIndex: -1,
+    syncToken: 0,
+    manualPause: false,
+    recoveryTimer: null,
+    recoveryAttempts: 0,
+    cueMode: false,
+  };
+}
+
 const state = {
   adapter: null,
   authClient: null,
@@ -14,23 +48,18 @@ const state = {
   authErrorCode: "",
   loadError: "",
   soundtrack: {
-    arcId: "",
-    queue: [],
-    currentIndex: 0,
-    paused: true,
-    volume: 70,
-    volumeOpen: false,
-    mode: "idle",
-    ready: false,
-    autoplayAttempted: false,
-    activeKey: "",
-    youtubePlayer: null,
-    syncToken: 0,
-    manualPause: false,
-    recoveryTimer: null,
-    recoveryAttempts: 0,
+    chapterId: "",
+    queues: { soundtrack: [], ambience: [], "sound-effect": [] },
+    cueTimelines: { soundtrack: [], ambience: [] },
+    channels: {
+      soundtrack: createAudioChannelState("soundtrack"),
+      ambience: createAudioChannelState("ambience"),
+      "sound-effect": createAudioChannelState("sound-effect"),
+    },
+    masterVolume: 100,
+    volumeOpen: "",
     cueObserver: null,
-    cueMode: false,
+    editorMode: false,
   },
 };
 
@@ -46,8 +75,16 @@ function loadStoredSoundtrackState() {
 }
 
 function saveStoredSoundtrackState() {
-  const { arcId, currentIndex, paused, volume } = state.soundtrack;
-  localStorage.setItem(SOUNDTRACK_STORAGE_KEY, JSON.stringify({ arcId, currentIndex, paused, volume }));
+  const channels = Object.fromEntries(Object.entries(state.soundtrack.channels).map(([type, channel]) => [type, {
+    currentIndex: channel.currentIndex,
+    paused: channel.paused,
+    volume: channel.volume,
+  }]));
+  localStorage.setItem(SOUNDTRACK_STORAGE_KEY, JSON.stringify({
+    chapterId: state.soundtrack.chapterId,
+    masterVolume: state.soundtrack.masterVolume,
+    channels,
+  }));
 }
 
 function getDisplayName(user = getUser()) {
@@ -537,6 +574,8 @@ function parseSoundtrackEntry(entry) {
       source: "youtube",
       videoId: youtubeId,
       startSeconds: parseYouTubeStartSeconds(url),
+      trackType: normalizeAudioTrackType(entry.trackType),
+      volumeMultiplier: clampVolumeMultiplier(entry.volumeMultiplier),
     };
   }
 
@@ -570,7 +609,10 @@ function buildSoundtrackQueue(soundtracks = []) {
 }
 
 function buildSoundtrackLabelMap(soundtracks = []) {
-  return new Map(buildSoundtrackQueue(soundtracks).map((track) => [track.id, track.label]));
+  return new Map(buildSoundtrackQueue(soundtracks).map((track) => [track.id, {
+    label: track.label,
+    trackType: track.trackType,
+  }]));
 }
 
 function buildVideoMap(videos = []) {
@@ -579,6 +621,77 @@ function buildVideoMap(videos = []) {
 
 function hasMarkdownMusicMarkers(chapter) {
   return getChapterRenderMode(chapter) === "markdown" && /\[music:\s*[^\]]+\]/i.test(chapter?.body ?? "");
+}
+
+function buildAudioCueTimelines(body, queue) {
+  const trackById = new Map(queue.map((track) => [track.id, track]));
+  const timelines = { soundtrack: [], ambience: [] };
+  const markerPattern = /\[(music|music-end):\s*([^\]]+)\]/gi;
+
+  for (const match of String(body ?? "").matchAll(markerPattern)) {
+    const markerType = match[1].toLowerCase();
+    const value = match[2].trim();
+    const offset = match.index ?? -1;
+    if (markerType === "music-end") {
+      const trackType = value.toLowerCase();
+      if (trackType === "soundtrack" || trackType === "ambience") {
+        timelines[trackType].push({ kind: "end", trackType, offset });
+      }
+      continue;
+    }
+
+    const track = trackById.get(value);
+    if (track && AUDIO_CHANNEL_CONFIG[track.trackType]?.autoCue) {
+      timelines[track.trackType].push({ kind: "track", trackType: track.trackType, trackId: track.id, offset });
+    }
+  }
+
+  return timelines;
+}
+
+function getNextCueTrack(type, afterIndex = -1) {
+  const nextEvent = (state.soundtrack.cueTimelines[type] ?? [])[afterIndex + 1];
+  if (!nextEvent || nextEvent.kind === "end") {
+    return null;
+  }
+  return getAudioQueue(type).find((track) => track.id === nextEvent.trackId)
+    ? { ...nextEvent, track: getAudioQueue(type).find((track) => track.id === nextEvent.trackId) }
+    : null;
+}
+
+function normalizeAudioTrackType(value) {
+  return Object.hasOwn(AUDIO_CHANNEL_CONFIG, value) ? value : "soundtrack";
+}
+
+function clampVolume(value) {
+  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+}
+
+function clampVolumeMultiplier(value) {
+  const number = Number(value);
+  return Math.max(0, Math.min(200, Number.isFinite(number) ? Math.round(number) : 100));
+}
+
+function normalizeAudioSettings(settings = {}) {
+  return {
+    masterVolume: settings.masterVolume === undefined ? 100 : clampVolume(settings.masterVolume),
+    soundtrackVolume: settings.soundtrackVolume === undefined ? 70 : clampVolume(settings.soundtrackVolume),
+    ambienceVolume: settings.ambienceVolume === undefined ? 70 : clampVolume(settings.ambienceVolume),
+    soundEffectVolume: settings.soundEffectVolume === undefined ? 85 : clampVolume(settings.soundEffectVolume),
+  };
+}
+
+function getCurrentAudioSettings(chapter = {}) {
+  if (state.soundtrack.chapterId !== chapter.id) {
+    return normalizeAudioSettings(chapter.audioSettings);
+  }
+
+  return {
+    masterVolume: clampVolume(state.soundtrack.masterVolume),
+    soundtrackVolume: clampVolume(state.soundtrack.channels.soundtrack.volume),
+    ambienceVolume: clampVolume(state.soundtrack.channels.ambience.volume),
+    soundEffectVolume: clampVolume(state.soundtrack.channels["sound-effect"].volume),
+  };
 }
 
 function clearSoundtrackCueObserver() {
@@ -596,9 +709,12 @@ function getSoundtrackLayer() {
 
   layer = document.createElement("div");
   layer.id = "soundtrack-layer";
-  layer.innerHTML = `
-    <div id="youtube-soundtrack-host"></div>
-  `;
+  layer.innerHTML = Object.keys(AUDIO_CHANNEL_CONFIG)
+    .flatMap((type) => [
+      `<div id="youtube-audio-${type}-host"></div>`,
+      ...(AUDIO_CHANNEL_CONFIG[type].loop ? [`<div id="youtube-audio-${type}-standby-host"></div>`] : []),
+    ])
+    .join("");
   document.body.append(layer);
   return layer;
 }
@@ -625,48 +741,74 @@ function loadExternalScript(src, readyCheck) {
   });
 }
 
-function getActiveSoundtrack() {
-  const queue = state.soundtrack.queue ?? [];
+function getAudioChannel(type) {
+  return state.soundtrack.channels[normalizeAudioTrackType(type)];
+}
+
+function getAudioQueue(type) {
+  return state.soundtrack.queues[normalizeAudioTrackType(type)] ?? [];
+}
+
+function getActiveSoundtrack(type = "soundtrack") {
+  const channel = getAudioChannel(type);
+  const queue = getAudioQueue(type);
   if (!queue.length) {
     return null;
   }
 
-  const index = Math.max(0, Math.min(state.soundtrack.currentIndex, queue.length - 1));
+  const index = Math.max(0, Math.min(channel.currentIndex, queue.length - 1));
   return queue[index] ?? null;
 }
 
 function updateQuickToolButton() {
-  const active = getActiveSoundtrack();
-  const musicButton = document.querySelector("[data-action='toggle-soundtrack']");
-  if (musicButton) {
-    musicButton.disabled = !active;
-    musicButton.classList.toggle("is-active", Boolean(active) && !state.soundtrack.paused);
-    musicButton.setAttribute("aria-pressed", String(Boolean(active) && !state.soundtrack.paused));
-    musicButton.setAttribute("title", active ? `${state.soundtrack.paused ? "Resume" : "Pause"} ${active.label}` : "No soundtrack available");
-  }
+  Object.keys(AUDIO_CHANNEL_CONFIG).forEach((type) => {
+    const channel = getAudioChannel(type);
+    const active = getActiveSoundtrack(type);
+    const playButton = document.querySelector(`[data-action='toggle-audio-channel'][data-audio-channel='${type}']`);
+    if (playButton) {
+      playButton.disabled = !active;
+      playButton.classList.toggle("is-active", Boolean(active) && !channel.paused);
+      playButton.setAttribute("aria-pressed", String(Boolean(active) && !channel.paused));
+      playButton.setAttribute("title", active ? `${channel.paused ? "Resume" : "Pause"} ${AUDIO_CHANNEL_CONFIG[type].label}` : `No ${AUDIO_CHANNEL_CONFIG[type].label.toLowerCase()} available`);
+    }
 
-  const volumeButton = document.querySelector("[data-action='toggle-volume-popout']");
-  if (volumeButton) {
-    volumeButton.disabled = !active;
-    volumeButton.classList.toggle("is-open", state.soundtrack.volumeOpen);
-    volumeButton.style.setProperty("--volume-fill", `${clampVolume(state.soundtrack.volume)}%`);
-    volumeButton.setAttribute("title", active ? `Volume ${clampVolume(state.soundtrack.volume)}%` : "No soundtrack available");
-  }
+    const volumeButton = document.querySelector(`[data-action='toggle-audio-volume'][data-audio-volume='${type}']`);
+    if (volumeButton) {
+      volumeButton.disabled = !getAudioQueue(type).length;
+      volumeButton.classList.toggle("is-open", state.soundtrack.volumeOpen === type);
+      volumeButton.style.setProperty("--volume-fill", `${channel.volume}%`);
+      volumeButton.setAttribute("title", `${AUDIO_CHANNEL_CONFIG[type].label} volume ${channel.volume}%`);
+    }
 
-  const slider = document.querySelector("#soundtrack-volume-slider");
-  if (slider) {
-    slider.value = String(clampVolume(state.soundtrack.volume));
-  }
+    const slider = document.querySelector(`[data-action='set-audio-volume'][data-audio-volume='${type}']`);
+    if (slider) slider.value = String(channel.volume);
+    const value = document.querySelector(`[data-audio-volume-value='${type}']`);
+    if (value) value.textContent = `${channel.volume}%`;
+  });
 
-  const value = document.querySelector("#soundtrack-volume-value");
-  if (value) {
-    value.textContent = `${clampVolume(state.soundtrack.volume)}%`;
+  const masterButton = document.querySelector(`[data-action='toggle-audio-volume'][data-audio-volume='master']`);
+  if (masterButton) {
+    masterButton.classList.toggle("is-open", state.soundtrack.volumeOpen === "master");
+    masterButton.style.setProperty("--volume-fill", `${state.soundtrack.masterVolume}%`);
+    masterButton.setAttribute("title", `Master volume ${state.soundtrack.masterVolume}%`);
   }
+  const masterSlider = document.querySelector(`[data-action='set-audio-volume'][data-audio-volume='master']`);
+  if (masterSlider) masterSlider.value = String(state.soundtrack.masterVolume);
+  const masterValue = document.querySelector(`[data-audio-volume-value='master']`);
+  if (masterValue) masterValue.textContent = `${state.soundtrack.masterVolume}%`;
 
-  const popout = document.querySelector(".volume-popout");
-  if (popout) {
-    popout.hidden = !state.soundtrack.volumeOpen;
-  }
+  document.querySelectorAll("[data-volume-popout]").forEach((popout) => {
+    popout.hidden = popout.dataset.volumePopout !== state.soundtrack.volumeOpen;
+  });
+
+  document.querySelectorAll("[data-action='preview-soundtrack']").forEach((button) => {
+    const track = Object.values(state.soundtrack.queues).flat().find((entry) => entry.id === button.dataset.soundtrackId);
+    const channel = track ? getAudioChannel(track.trackType) : null;
+    const playing = Boolean(track && channel && channel.activeKey === track.id && !channel.paused);
+    button.classList.toggle("is-active", playing);
+    button.textContent = playing ? "Stop preview" : "Preview";
+    button.setAttribute("aria-pressed", String(playing));
+  });
 }
 
 function persistSoundtrackUi() {
@@ -675,218 +817,450 @@ function persistSoundtrackUi() {
 }
 
 function clearSoundtrackUi() {
-  const host = document.querySelector("#soundtrack-status");
-  if (host) {
-    host.textContent = "No soundtrack loaded.";
-  }
+  Object.keys(AUDIO_CHANNEL_CONFIG).forEach((type) => setSoundtrackStatus(type, `No ${AUDIO_CHANNEL_CONFIG[type].label.toLowerCase()} loaded.`));
   updateQuickToolButton();
 }
 
-function setSoundtrackStatus(message) {
-  const host = document.querySelector("#soundtrack-status");
+function setSoundtrackStatus(type, message) {
+  const host = document.querySelector(`[data-audio-status='${type}']`);
   if (host) {
     host.textContent = message;
   }
 }
 
-function clearSoundtrackRecovery() {
-  if (state.soundtrack.recoveryTimer) {
-    clearTimeout(state.soundtrack.recoveryTimer);
-    state.soundtrack.recoveryTimer = null;
+function clearSoundtrackRecovery(type) {
+  const channel = getAudioChannel(type);
+  if (channel.recoveryTimer) {
+    clearTimeout(channel.recoveryTimer);
+    channel.recoveryTimer = null;
   }
 }
 
-function requestSoundtrackRecovery(reason = "Playback interrupted", delay = 2200) {
-  const active = getActiveSoundtrack();
-  if (!active || state.soundtrack.paused || state.soundtrack.manualPause) {
+function requestSoundtrackRecovery(type, reason = "Playback interrupted", delay = 2200) {
+  const channel = getAudioChannel(type);
+  const active = getActiveSoundtrack(type);
+  if (!active || channel.paused || channel.manualPause) {
     return;
   }
 
-  clearSoundtrackRecovery();
+  clearSoundtrackRecovery(type);
   const expectedTrackId = active.id;
-  const expectedToken = state.soundtrack.syncToken;
-  setSoundtrackStatus(`${reason}. Trying to resume...`);
+  const expectedToken = channel.syncToken;
+  setSoundtrackStatus(type, `${reason}. Trying to resume...`);
 
-  state.soundtrack.recoveryTimer = setTimeout(() => {
-    const current = getActiveSoundtrack();
+  channel.recoveryTimer = setTimeout(() => {
+    const current = getActiveSoundtrack(type);
     if (
       !current
       || current.id !== expectedTrackId
-      || expectedToken !== state.soundtrack.syncToken
-      || state.soundtrack.paused
-      || state.soundtrack.manualPause
-      || !state.soundtrack.youtubePlayer
+      || expectedToken !== channel.syncToken
+      || channel.paused
+      || channel.manualPause
+      || !channel.youtubePlayer
     ) {
       return;
     }
 
-    state.soundtrack.recoveryAttempts += 1;
+    channel.recoveryAttempts += 1;
     try {
-      if (state.soundtrack.recoveryAttempts % 4 === 0 && current.videoId) {
-        loadYouTubeTrack(current);
+      if (channel.recoveryAttempts % 4 === 0 && current.videoId) {
+        loadYouTubeTrack(type, current);
       } else {
-        state.soundtrack.youtubePlayer.playVideo();
+        channel.youtubePlayer.playVideo();
       }
-      setSoundtrackStatus(`Resuming: ${current.label}`);
+      setSoundtrackStatus(type, `Resuming: ${current.label}`);
     } catch (error) {
-      setSoundtrackStatus(`Soundtrack recovery failed: ${String(error.message || error)}`);
+      setSoundtrackStatus(type, `Playback recovery failed: ${String(error.message || error)}`);
     }
   }, delay);
 }
 
-function pauseCurrentSoundtrack() {
-  const active = getActiveSoundtrack();
-  clearSoundtrackRecovery();
-  state.soundtrack.manualPause = true;
-  if (state.soundtrack.mode === "youtube" && state.soundtrack.youtubePlayer?.pauseVideo) {
-    state.soundtrack.youtubePlayer.pauseVideo();
+function pauseCurrentSoundtrack(type) {
+  const channel = getAudioChannel(type);
+  const active = getActiveSoundtrack(type);
+  clearSoundtrackRecovery(type);
+  channel.manualPause = true;
+  if (channel.mode === "youtube" && channel.youtubePlayer?.pauseVideo) {
+    channel.youtubePlayer.pauseVideo();
   }
 
-  state.soundtrack.paused = true;
+  channel.paused = true;
   if (active) {
-    setSoundtrackStatus(`Paused: ${active.label}`);
+    setSoundtrackStatus(type, `Paused: ${active.label}`);
   }
   persistSoundtrackUi();
 }
 
-function playCurrentSoundtrack() {
-  const active = getActiveSoundtrack();
+function stopSoundtrackAtMarker(type, cueIndex = -1) {
+  const channel = getAudioChannel(type);
+  channel.currentCueIndex = cueIndex;
+  cancelStandbyPreload(type);
+  if (!getActiveSoundtrack(type) || channel.paused) {
+    return;
+  }
+
+  pauseCurrentSoundtrack(type);
+  setSoundtrackStatus(type, `${AUDIO_CHANNEL_CONFIG[type].label} ended by chapter cue.`);
+}
+
+function playCurrentSoundtrack(type) {
+  const channel = getAudioChannel(type);
+  const active = getActiveSoundtrack(type);
   if (!active) {
     return;
   }
 
-  clearSoundtrackRecovery();
-  state.soundtrack.manualPause = false;
-  state.soundtrack.recoveryAttempts = 0;
-  if (state.soundtrack.mode === "youtube" && state.soundtrack.youtubePlayer?.playVideo) {
-    state.soundtrack.youtubePlayer.playVideo();
+  clearSoundtrackRecovery(type);
+  channel.manualPause = false;
+  channel.recoveryAttempts = 0;
+  if (channel.mode === "youtube" && channel.youtubePlayer?.playVideo) {
+    channel.youtubePlayer.playVideo();
+  } else {
+    syncSoundtrackPlayback(type);
   }
 
-  state.soundtrack.paused = false;
-  setSoundtrackStatus(`Now playing: ${active.label}`);
+  channel.paused = false;
+  setSoundtrackStatus(type, `Now playing: ${active.label}`);
   persistSoundtrackUi();
 }
 
-function advanceSoundtrack() {
-  if (!state.soundtrack.queue.length) {
+function loopCurrentSoundtrack(type) {
+  const channel = getAudioChannel(type);
+  const active = getActiveSoundtrack(type);
+  if (!active || channel.manualPause || !AUDIO_CHANNEL_CONFIG[type].loop) {
     return;
   }
 
-  state.soundtrack.currentIndex = (state.soundtrack.currentIndex + 1) % state.soundtrack.queue.length;
-  state.soundtrack.activeKey = "";
-  state.soundtrack.ready = false;
-  state.soundtrack.autoplayAttempted = false;
-  state.soundtrack.manualPause = false;
-  state.soundtrack.recoveryAttempts = 0;
-  clearSoundtrackRecovery();
-  persistSoundtrackUi();
-  syncSoundtrackPlayback();
-}
-
-function loopCurrentSoundtrack() {
-  const active = getActiveSoundtrack();
-  if (!active || state.soundtrack.manualPause) {
-    return;
-  }
-
-  clearSoundtrackRecovery();
-  state.soundtrack.paused = false;
-  state.soundtrack.recoveryAttempts = 0;
+  clearSoundtrackRecovery(type);
+  channel.paused = false;
+  channel.recoveryAttempts = 0;
 
   try {
-    if (state.soundtrack.youtubePlayer?.seekTo) {
-      state.soundtrack.youtubePlayer.seekTo(0, true);
-      state.soundtrack.youtubePlayer.playVideo();
-    } else if (state.soundtrack.youtubePlayer?.loadVideoById && active.videoId) {
-      loadYouTubeTrack(active, 0);
+    if (channel.youtubePlayer?.seekTo) {
+      channel.youtubePlayer.seekTo(0, true);
+      channel.youtubePlayer.playVideo();
+    } else if (channel.youtubePlayer?.loadVideoById && active.videoId) {
+      loadYouTubeTrack(type, active, 0);
     }
-    setSoundtrackStatus(`Looping cue: ${active.label}`);
-    requestSoundtrackRecovery("Cue loop did not restart", 5000);
+    setSoundtrackStatus(type, `Looping: ${active.label}`);
+    requestSoundtrackRecovery(type, "Loop did not restart", 5000);
   } catch (error) {
-    setSoundtrackStatus(`Cue loop failed: ${String(error.message || error)}`);
+    setSoundtrackStatus(type, `Loop failed: ${String(error.message || error)}`);
   }
 }
 
-function isTrackAlreadyActive(trackId) {
-  const current = getActiveSoundtrack();
-  return current?.id === trackId && state.soundtrack.activeKey === trackId;
+function isTrackAlreadyActive(type, trackId) {
+  const channel = getAudioChannel(type);
+  const current = getActiveSoundtrack(type);
+  return current?.id === trackId && channel.activeKey === trackId;
 }
 
 function playSoundtrackById(trackId, options = {}) {
-  const index = state.soundtrack.queue.findIndex((track) => track.id === trackId);
-  if (index < 0) {
-    setSoundtrackStatus("Music cue points to a missing soundtrack.");
+  const allTracks = Object.values(state.soundtrack.queues).flat();
+  const selected = allTracks.find((track) => track.id === trackId);
+  if (!selected) {
+    setSoundtrackStatus("soundtrack", "Music cue points to a missing track.");
     return;
   }
 
-  if (isTrackAlreadyActive(trackId)) {
-    if (state.soundtrack.paused) {
-      playCurrentSoundtrack();
+  const type = selected.trackType;
+  const config = AUDIO_CHANNEL_CONFIG[type];
+  if (options.source !== "button" && !config.autoCue) {
+    return;
+  }
+
+  const channel = getAudioChannel(type);
+  const queue = getAudioQueue(type);
+  const index = queue.findIndex((track) => track.id === trackId);
+  if (index < 0) {
+    setSoundtrackStatus(type, "Music cue points to a missing track.");
+    return;
+  }
+
+  if (Number.isFinite(Number(options.cueIndex))) {
+    channel.currentCueIndex = Number(options.cueIndex);
+  }
+
+  if (isTrackAlreadyActive(type, trackId)) {
+    if (!config.loop && options.source === "button") {
+      channel.paused = false;
+      channel.manualPause = false;
+      loadYouTubeTrack(type, selected);
+      setSoundtrackStatus(type, `Playing: ${selected.label}`);
+      persistSoundtrackUi();
+      return;
+    }
+
+    if (channel.paused) {
+      if (config.loop) {
+        playCurrentSoundtrack(type);
+      }
+    }
+    if (config.loop && !state.soundtrack.editorMode) preloadNextCue(type, channel.currentCueIndex);
+    return;
+  }
+
+  channel.currentIndex = index;
+  channel.paused = false;
+  channel.manualPause = false;
+  channel.ready = false;
+  channel.activeKey = "";
+  channel.recoveryAttempts = 0;
+  clearSoundtrackRecovery(type);
+  persistSoundtrackUi();
+  syncSoundtrackPlayback(type);
+
+  if (options.source === "button") {
+    setSoundtrackStatus(type, `Cue selected: ${queue[index].label}`);
+  }
+}
+
+function applySoundtrackVolume(type) {
+  const channel = getAudioChannel(type);
+  const track = getActiveSoundtrack(type);
+  channel.volume = clampVolume(channel.volume);
+  const multiplier = clampVolumeMultiplier(track?.volumeMultiplier);
+  const effectiveVolume = clampVolume((state.soundtrack.masterVolume * channel.volume * multiplier) / 10000);
+  if (channel.youtubePlayer?.setVolume) {
+    channel.youtubePlayer.setVolume(effectiveVolume);
+  }
+  persistSoundtrackUi();
+}
+
+function setAudioVolume(scope, value) {
+  if (scope === "master") {
+    state.soundtrack.masterVolume = clampVolume(value);
+    Object.keys(AUDIO_CHANNEL_CONFIG).forEach(applySoundtrackVolume);
+    return;
+  }
+
+  const type = normalizeAudioTrackType(scope);
+  getAudioChannel(type).volume = clampVolume(value);
+  applySoundtrackVolume(type);
+}
+
+function adjustAudioVolume(scope, delta) {
+  const current = scope === "master" ? state.soundtrack.masterVolume : getAudioChannel(scope).volume;
+  setAudioVolume(scope, current + delta);
+}
+
+function handleYouTubePlayerState(type, event) {
+  const channel = getAudioChannel(type);
+  const player = event.target;
+  if (player === channel.standbyPlayer) {
+    if (event.data === window.YT.PlayerState.PLAYING && channel.standbyWarming) {
+      const token = channel.standbyToken;
+      if (channel.standbyPauseTimer) clearTimeout(channel.standbyPauseTimer);
+      channel.standbyPauseTimer = setTimeout(() => {
+        if (token !== channel.standbyToken || player !== channel.standbyPlayer) return;
+        player.pauseVideo?.();
+        player.seekTo?.(channel.standbyStartSeconds, true);
+      }, 450);
+    }
+    if (event.data === window.YT.PlayerState.PAUSED && channel.standbyWarming) {
+      channel.standbyWarming = false;
+      channel.standbyReady = true;
+      player.seekTo?.(channel.standbyStartSeconds, true);
     }
     return;
   }
 
-  state.soundtrack.currentIndex = index;
-  state.soundtrack.paused = false;
-  state.soundtrack.manualPause = false;
-  state.soundtrack.ready = false;
-  state.soundtrack.activeKey = "";
-  state.soundtrack.recoveryAttempts = 0;
-  clearSoundtrackRecovery();
-  persistSoundtrackUi();
-  syncSoundtrackPlayback();
+  if (player !== channel.youtubePlayer) return;
 
-  if (options.source === "button") {
-    setSoundtrackStatus(`Cue selected: ${state.soundtrack.queue[index].label}`);
-  }
-}
-
-function clampVolume(value) {
-  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
-}
-
-function applySoundtrackVolume() {
-  const volume = clampVolume(state.soundtrack.volume);
-  state.soundtrack.volume = volume;
-  if (state.soundtrack.youtubePlayer?.setVolume) {
-    state.soundtrack.youtubePlayer.setVolume(volume);
-  }
-  persistSoundtrackUi();
-}
-
-function setSoundtrackVolume(value) {
-  state.soundtrack.volume = clampVolume(value);
-  applySoundtrackVolume();
-}
-
-function adjustSoundtrackVolume(delta) {
-  setSoundtrackVolume(clampVolume(state.soundtrack.volume + delta));
-}
-
-function loadYouTubeTrack(track, startSeconds = track.startSeconds ?? 0) {
-  if (!state.soundtrack.youtubePlayer?.loadVideoById) {
+  if (event.data === window.YT.PlayerState.ENDED) {
+    clearSoundtrackRecovery(type);
+    channel.recoveryAttempts = 0;
+    if (AUDIO_CHANNEL_CONFIG[type].loop) {
+      loopCurrentSoundtrack(type);
+      return;
+    }
+    channel.paused = true;
+    channel.manualPause = true;
+    setSoundtrackStatus(type, `Finished: ${getActiveSoundtrack(type)?.label ?? AUDIO_CHANNEL_CONFIG[type].label}`);
+    persistSoundtrackUi();
     return;
   }
 
-  state.soundtrack.youtubePlayer.loadVideoById({
+  if (event.data === window.YT.PlayerState.PLAYING) {
+    clearSoundtrackRecovery(type);
+    channel.paused = false;
+    channel.manualPause = false;
+    channel.recoveryAttempts = 0;
+    const active = getActiveSoundtrack(type);
+    if (active) setSoundtrackStatus(type, `Now playing: ${active.label}`);
+    persistSoundtrackUi();
+  }
+
+  if (event.data === window.YT.PlayerState.PAUSED) {
+    if (channel.manualPause) {
+      channel.paused = true;
+      persistSoundtrackUi();
+      return;
+    }
+    requestSoundtrackRecovery(type, "Playback paused by YouTube");
+  }
+
+  if (event.data === window.YT.PlayerState.BUFFERING) {
+    requestSoundtrackRecovery(type, "Playback is buffering", 4500);
+  }
+
+  if (event.data === window.YT.PlayerState.CUED || event.data === window.YT.PlayerState.UNSTARTED) {
+    requestSoundtrackRecovery(type, "Playback is waiting");
+  }
+}
+
+function handleYouTubePlayerError(type, event) {
+  const channel = getAudioChannel(type);
+  if (event.target === channel.standbyPlayer) {
+    channel.standbyWarming = false;
+    channel.standbyReady = false;
+    return;
+  }
+
+  if (event.target !== channel.youtubePlayer) return;
+  const active = getActiveSoundtrack(type);
+  setSoundtrackStatus(type, `YouTube player error${event?.data ? ` ${event.data}` : ""}. Retrying...`);
+  if (active) requestSoundtrackRecovery(type, "YouTube player error", 1500);
+}
+
+function cancelStandbyPreload(type) {
+  const channel = getAudioChannel(type);
+  channel.standbyToken += 1;
+  if (channel.standbyPauseTimer) {
+    clearTimeout(channel.standbyPauseTimer);
+    channel.standbyPauseTimer = null;
+  }
+  channel.standbyWarming = false;
+  channel.standbyReady = false;
+  channel.standbyTrackId = "";
+  channel.standbyStartSeconds = 0;
+  channel.standbyPlayer?.pauseVideo?.();
+}
+
+async function ensureStandbyPlayer(type) {
+  const channel = getAudioChannel(type);
+  if (channel.standbyPlayer) return channel.standbyPlayer;
+
+  await loadExternalScript("https://www.youtube.com/iframe_api", () => Boolean(window.YT?.Player));
+  getSoundtrackLayer();
+  const primaryHost = `youtube-audio-${type}-host`;
+  const secondaryHost = `youtube-audio-${type}-standby-host`;
+  const hostId = channel.youtubePlayerHost === primaryHost ? secondaryHost : primaryHost;
+  let resolveReady;
+  const ready = new Promise((resolve) => { resolveReady = resolve; });
+  channel.standbyPlayerHost = hostId;
+  channel.standbyPlayer = new window.YT.Player(hostId, {
+    height: "200",
+    width: "320",
+    playerVars: { autoplay: 0, controls: 0, rel: 0 },
+    events: {
+      onReady: () => resolveReady(),
+      onStateChange: (event) => handleYouTubePlayerState(type, event),
+      onError: (event) => handleYouTubePlayerError(type, event),
+    },
+  });
+  await ready;
+  return channel.standbyPlayer;
+}
+
+async function preloadTrack(type, track) {
+  if (!track || state.soundtrack.editorMode || !AUDIO_CHANNEL_CONFIG[type].loop) return;
+  const channel = getAudioChannel(type);
+  if (channel.standbyTrackId === track.id && (channel.standbyReady || channel.standbyWarming)) return;
+
+  const chapterId = state.soundtrack.chapterId;
+  const token = ++channel.standbyToken;
+  const player = await ensureStandbyPlayer(type);
+  if (token !== channel.standbyToken || chapterId !== state.soundtrack.chapterId || player !== channel.standbyPlayer) return;
+
+  if (channel.standbyPauseTimer) clearTimeout(channel.standbyPauseTimer);
+  channel.standbyTrackId = track.id;
+  channel.standbyStartSeconds = Math.max(0, Number(track.startSeconds) || 0);
+  channel.standbyReady = false;
+  channel.standbyWarming = true;
+  player.mute?.();
+  player.loadVideoById?.({ videoId: track.videoId, startSeconds: channel.standbyStartSeconds });
+}
+
+function preloadNextCue(type, afterIndex = -1) {
+  const next = getNextCueTrack(type, afterIndex);
+  if (!next) {
+    cancelStandbyPreload(type);
+    return;
+  }
+  preloadTrack(type, next.track);
+}
+
+function activatePreloadedTrack(type, track) {
+  const channel = getAudioChannel(type);
+  if (!channel.standbyPlayer || !channel.standbyReady || channel.standbyTrackId !== track.id) return false;
+
+  clearSoundtrackRecovery(type);
+  channel.standbyToken += 1;
+  if (channel.standbyPauseTimer) {
+    clearTimeout(channel.standbyPauseTimer);
+    channel.standbyPauseTimer = null;
+  }
+
+  const previousPlayer = channel.youtubePlayer;
+  const previousHost = channel.youtubePlayerHost;
+  channel.youtubePlayer = channel.standbyPlayer;
+  channel.youtubePlayerHost = channel.standbyPlayerHost;
+  channel.standbyPlayer = previousPlayer;
+  channel.standbyPlayerHost = previousHost;
+  channel.standbyTrackId = "";
+  channel.standbyStartSeconds = 0;
+  channel.standbyReady = false;
+  channel.standbyWarming = false;
+
+  channel.standbyPlayer?.pauseVideo?.();
+  channel.standbyPlayer?.mute?.();
+  channel.youtubePlayer.unMute?.();
+  channel.mode = "youtube";
+  channel.ready = true;
+  channel.activeKey = track.id;
+  channel.paused = false;
+  channel.manualPause = false;
+  channel.recoveryAttempts = 0;
+  applySoundtrackVolume(type);
+  channel.youtubePlayer.playVideo?.();
+  setSoundtrackStatus(type, `Now playing: ${track.label}`);
+  requestSoundtrackRecovery(type, "Preloaded track did not start", 3500);
+  updateQuickToolButton();
+  preloadNextCue(type, channel.currentCueIndex);
+  return true;
+}
+
+function loadYouTubeTrack(type, track, startSeconds = track.startSeconds ?? 0) {
+  const player = getAudioChannel(type).youtubePlayer;
+  if (!player?.loadVideoById) {
+    return;
+  }
+
+  player.loadVideoById({
     videoId: track.videoId,
     startSeconds: Math.max(0, Number(startSeconds) || 0),
   });
 }
 
-async function ensureYouTubePlayer(track, token) {
+async function ensureYouTubePlayer(type, track, token) {
+  const channel = getAudioChannel(type);
   await loadExternalScript("https://www.youtube.com/iframe_api", () => Boolean(window.YT?.Player));
 
-  if (token !== state.soundtrack.syncToken) {
+  if (token !== channel.syncToken) {
     return;
   }
 
   getSoundtrackLayer();
 
-  if (!state.soundtrack.youtubePlayer) {
+  if (!channel.youtubePlayer) {
     await new Promise((resolve) => {
       const start = () => {
-        state.soundtrack.youtubePlayer = new window.YT.Player("youtube-soundtrack-host", {
+        const primaryHost = `youtube-audio-${type}-host`;
+        const secondaryHost = `youtube-audio-${type}-standby-host`;
+        const hostId = channel.standbyPlayerHost === primaryHost ? secondaryHost : primaryHost;
+        channel.youtubePlayerHost = hostId;
+        channel.youtubePlayer = new window.YT.Player(hostId, {
           height: "200",
           width: "320",
           videoId: track.videoId,
@@ -898,55 +1272,8 @@ async function ensureYouTubePlayer(track, token) {
           },
           events: {
             onReady: () => resolve(),
-            onStateChange: (event) => {
-              if (event.data === window.YT.PlayerState.ENDED) {
-                clearSoundtrackRecovery();
-                state.soundtrack.recoveryAttempts = 0;
-                if (state.soundtrack.cueMode) {
-                  loopCurrentSoundtrack();
-                  return;
-                }
-                advanceSoundtrack();
-                return;
-              }
-
-              if (event.data === window.YT.PlayerState.PLAYING) {
-                clearSoundtrackRecovery();
-                state.soundtrack.paused = false;
-                state.soundtrack.manualPause = false;
-                state.soundtrack.recoveryAttempts = 0;
-                const active = getActiveSoundtrack();
-                if (active) {
-                  setSoundtrackStatus(`Now playing: ${active.label}`);
-                }
-                persistSoundtrackUi();
-              }
-
-              if (event.data === window.YT.PlayerState.PAUSED) {
-                if (state.soundtrack.manualPause) {
-                  state.soundtrack.paused = true;
-                  persistSoundtrackUi();
-                  return;
-                }
-
-                requestSoundtrackRecovery("Playback paused by YouTube");
-              }
-
-              if (event.data === window.YT.PlayerState.BUFFERING) {
-                requestSoundtrackRecovery("Playback is buffering", 4500);
-              }
-
-              if (event.data === window.YT.PlayerState.CUED || event.data === window.YT.PlayerState.UNSTARTED) {
-                requestSoundtrackRecovery("Playback is waiting");
-              }
-            },
-            onError: (event) => {
-              const active = getActiveSoundtrack();
-              setSoundtrackStatus(`YouTube player error${event?.data ? ` ${event.data}` : ""}. Retrying...`);
-              if (active) {
-                requestSoundtrackRecovery("YouTube player error", 1500);
-              }
-            },
+            onStateChange: (event) => handleYouTubePlayerState(type, event),
+            onError: (event) => handleYouTubePlayerError(type, event),
           },
         });
       };
@@ -962,114 +1289,171 @@ async function ensureYouTubePlayer(track, token) {
       }
     });
   } else {
-    loadYouTubeTrack(track);
+    loadYouTubeTrack(type, track);
   }
 
-  if (token !== state.soundtrack.syncToken) {
+  if (token !== channel.syncToken) {
     return;
   }
 
-  state.soundtrack.mode = "youtube";
-  state.soundtrack.ready = true;
-  state.soundtrack.activeKey = track.id;
-  applySoundtrackVolume();
-  setSoundtrackStatus(`Now playing: ${track.label}`);
-  if (!state.soundtrack.paused) {
-    state.soundtrack.manualPause = false;
-    state.soundtrack.youtubePlayer.playVideo();
-    requestSoundtrackRecovery("Playback did not start", 5000);
+  channel.mode = "youtube";
+  channel.ready = true;
+  channel.activeKey = track.id;
+  applySoundtrackVolume(type);
+  setSoundtrackStatus(type, `Now playing: ${track.label}`);
+  if (!channel.paused) {
+    channel.manualPause = false;
+    channel.youtubePlayer.playVideo();
+    requestSoundtrackRecovery(type, "Playback did not start", 5000);
   }
+  if (channel.cueMode) preloadNextCue(type, channel.currentCueIndex);
   updateQuickToolButton();
 }
 
-async function syncSoundtrackPlayback() {
-  const token = ++state.soundtrack.syncToken;
-  const track = getActiveSoundtrack();
+async function syncSoundtrackPlayback(type) {
+  const channel = getAudioChannel(type);
+  const token = ++channel.syncToken;
+  const track = getActiveSoundtrack(type);
 
   if (!track) {
-    state.soundtrack.arcId = "";
-    state.soundtrack.queue = [];
-    state.soundtrack.mode = "idle";
-    state.soundtrack.ready = false;
-    state.soundtrack.activeKey = "";
-    pauseCurrentSoundtrack();
-    clearSoundtrackUi();
+    channel.mode = "idle";
+    channel.ready = false;
+    channel.activeKey = "";
+    channel.paused = true;
+    channel.manualPause = true;
+    channel.youtubePlayer?.pauseVideo?.();
+    setSoundtrackStatus(type, `No ${AUDIO_CHANNEL_CONFIG[type].label.toLowerCase()} loaded.`);
+    updateQuickToolButton();
     return;
   }
 
   try {
     if (track.source === "youtube") {
-      await ensureYouTubePlayer(track, token);
+      if (activatePreloadedTrack(type, track)) return;
+      await ensureYouTubePlayer(type, track, token);
       return;
     }
   } catch (error) {
-    state.saveStatus = `Soundtrack error: ${String(error.message || error)}`;
-    setSoundtrackStatus("Soundtrack could not be loaded.");
+    state.saveStatus = `${AUDIO_CHANNEL_CONFIG[type].label} error: ${String(error.message || error)}`;
+    setSoundtrackStatus(type, `${AUDIO_CHANNEL_CONFIG[type].label} could not be loaded.`);
     updateQuickToolButton();
   }
 }
 
-function activateSoundtrackQueue(arcId, queue, options = {}) {
-  const stored = loadStoredSoundtrackState();
-  const queueChanged = arcId !== state.soundtrack.arcId || JSON.stringify(queue.map((entry) => entry.id)) !== JSON.stringify((state.soundtrack.queue ?? []).map((entry) => entry.id));
-
+function activateSoundtrackQueue(chapterId, queue, options = {}) {
+  const contextChanged = chapterId !== state.soundtrack.chapterId;
+  const editorMode = Boolean(options.editorMode);
+  const modeChanged = editorMode !== state.soundtrack.editorMode;
+  const settings = normalizeAudioSettings(options.audioSettings);
+  const nextQueues = Object.fromEntries(Object.keys(AUDIO_CHANNEL_CONFIG).map((type) => [
+    type,
+    queue.filter((track) => track.trackType === type),
+  ]));
+  const nextCueTimelines = buildAudioCueTimelines(options.body, queue);
+  const cueIds = new Set([...String(options.body ?? "").matchAll(/\[music:\s*([^\]]+)\]/gi)].map((match) => match[1].trim()));
   clearSoundtrackCueObserver();
-  state.soundtrack.arcId = arcId;
-  state.soundtrack.queue = queue;
-  state.soundtrack.cueMode = Boolean(options.waitForCue);
-
-  if (queueChanged) {
-    state.soundtrack.currentIndex =
-      stored.arcId === arcId && typeof stored.currentIndex === "number"
-        ? Math.max(0, Math.min(stored.currentIndex, queue.length - 1))
-        : 0;
-    state.soundtrack.paused = stored.arcId === arcId ? Boolean(stored.paused) : false;
-    state.soundtrack.manualPause = state.soundtrack.paused;
-    state.soundtrack.volume = typeof stored.volume === "number" ? clampVolume(stored.volume) : state.soundtrack.volume;
-    state.soundtrack.ready = false;
-    state.soundtrack.activeKey = "";
-    state.soundtrack.recoveryAttempts = 0;
-    clearSoundtrackRecovery();
+  state.soundtrack.chapterId = chapterId;
+  state.soundtrack.editorMode = editorMode;
+  if (contextChanged) {
+    state.soundtrack.masterVolume = settings.masterVolume;
+    state.soundtrack.channels.soundtrack.volume = settings.soundtrackVolume;
+    state.soundtrack.channels.ambience.volume = settings.ambienceVolume;
+    state.soundtrack.channels["sound-effect"].volume = settings.soundEffectVolume;
   }
+
+  Object.keys(AUDIO_CHANNEL_CONFIG).forEach((type) => {
+    const channel = getAudioChannel(type);
+    const previousIds = getAudioQueue(type).map((track) => track.id).join("|");
+    const nextIds = nextQueues[type].map((track) => track.id).join("|");
+    const queueChanged = previousIds !== nextIds;
+    const timelineChanged = type !== "sound-effect"
+      && JSON.stringify(state.soundtrack.cueTimelines[type] ?? []) !== JSON.stringify(nextCueTimelines[type] ?? []);
+    state.soundtrack.queues[type] = nextQueues[type];
+    if (type !== "sound-effect") state.soundtrack.cueTimelines[type] = nextCueTimelines[type];
+    channel.cueMode = AUDIO_CHANNEL_CONFIG[type].autoCue && nextQueues[type].some((track) => cueIds.has(track.id));
+
+    if (contextChanged || queueChanged || modeChanged || timelineChanged) {
+      clearSoundtrackRecovery(type);
+      cancelStandbyPreload(type);
+      channel.syncToken += 1;
+      channel.currentIndex = 0;
+      channel.currentCueIndex = -1;
+      channel.paused = editorMode || channel.cueMode || !AUDIO_CHANNEL_CONFIG[type].autoCue;
+      channel.manualPause = channel.paused;
+      channel.ready = false;
+      channel.activeKey = "";
+      channel.recoveryAttempts = 0;
+      channel.youtubePlayer?.pauseVideo?.();
+    }
+
+    if (!nextQueues[type].length) {
+      channel.paused = true;
+      channel.manualPause = true;
+      setSoundtrackStatus(type, `No ${AUDIO_CHANNEL_CONFIG[type].label.toLowerCase()} loaded.`);
+      return;
+    }
+
+    applySoundtrackVolume(type);
+
+    if (editorMode) {
+      setSoundtrackStatus(type, `Use Preview to play ${AUDIO_CHANNEL_CONFIG[type].label.toLowerCase()} in the editor.`);
+      return;
+    }
+
+    if (channel.cueMode) {
+      setSoundtrackStatus(type, `Waiting for ${AUDIO_CHANNEL_CONFIG[type].label.toLowerCase()} cue.`);
+      preloadNextCue(type, channel.currentCueIndex);
+      return;
+    }
+
+    if (AUDIO_CHANNEL_CONFIG[type].autoCue && (contextChanged || queueChanged || !channel.activeKey)) {
+      channel.paused = false;
+      channel.manualPause = false;
+      syncSoundtrackPlayback(type);
+    } else if (!AUDIO_CHANNEL_CONFIG[type].autoCue) {
+      setSoundtrackStatus(type, "Sound effects play only from their cue buttons.");
+    }
+  });
 
   persistSoundtrackUi();
-  if (state.soundtrack.cueMode) {
-    if (queueChanged || !state.soundtrack.activeKey) {
-      state.soundtrack.paused = true;
-      state.soundtrack.manualPause = true;
-      if (state.soundtrack.youtubePlayer?.pauseVideo) {
-        state.soundtrack.youtubePlayer.pauseVideo();
-      }
-      saveStoredSoundtrackState();
-      setSoundtrackStatus("Waiting for music cue.");
-      updateQuickToolButton();
-    }
-    observeSoundtrackCues();
-    return;
-  }
-
-  syncSoundtrackPlayback();
+  observeSoundtrackCues();
 }
 
 function observeSoundtrackCues() {
-  const cues = [...document.querySelectorAll(".music-cue[data-music-trigger]")];
-  if (!cues.length || !state.soundtrack.queue.length) {
+  if (state.soundtrack.editorMode) {
     return;
   }
 
-  const queueIds = new Set(state.soundtrack.queue.map((track) => track.id));
+  const cues = [...document.querySelectorAll("[data-music-trigger], [data-music-end]")];
+  const allTracks = Object.values(state.soundtrack.queues).flat();
+  if (!cues.length || !allTracks.length) {
+    return;
+  }
+
+  const trackById = new Map(allTracks.map((track) => [track.id, track]));
   state.soundtrack.cueObserver = new IntersectionObserver(
     (entries) => {
-      const visibleCue = entries
+      const visibleCues = entries
         .filter((entry) => entry.isIntersecting)
-        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+      const triggeredTypes = new Set();
+      visibleCues.forEach((entry) => {
+        const endType = entry.target?.dataset?.musicEnd;
+        const cueIndex = Number(entry.target?.dataset?.musicCueIndex ?? -1);
+        if (endType && ["soundtrack", "ambience"].includes(endType)) {
+          if (!triggeredTypes.has(endType)) {
+            triggeredTypes.add(endType);
+            stopSoundtrackAtMarker(endType, cueIndex);
+          }
+          return;
+        }
 
-      const trackId = visibleCue?.target?.dataset?.musicTrigger;
-      if (!trackId || !queueIds.has(trackId)) {
-        return;
-      }
-
-      playSoundtrackById(trackId);
+        const trackId = entry.target?.dataset?.musicTrigger;
+        const track = trackById.get(trackId);
+        if (!track || !AUDIO_CHANNEL_CONFIG[track.trackType].autoCue || triggeredTypes.has(track.trackType)) return;
+        triggeredTypes.add(track.trackType);
+        playSoundtrackById(trackId, { source: "scroll", cueIndex });
+      });
     },
     {
       root: null,
@@ -1082,40 +1466,63 @@ function observeSoundtrackCues() {
 }
 
 function deactivateSoundtrackQueue() {
-  clearSoundtrackRecovery();
   clearSoundtrackCueObserver();
-  state.soundtrack.arcId = "";
-  state.soundtrack.queue = [];
-  state.soundtrack.currentIndex = 0;
-  state.soundtrack.paused = true;
-  state.soundtrack.manualPause = true;
-  state.soundtrack.volumeOpen = false;
-  state.soundtrack.activeKey = "";
-  state.soundtrack.ready = false;
-  state.soundtrack.recoveryAttempts = 0;
-  state.soundtrack.cueMode = false;
-  if (state.soundtrack.youtubePlayer?.pauseVideo) {
-    state.soundtrack.youtubePlayer.pauseVideo();
-  }
+  state.soundtrack.chapterId = "";
+  state.soundtrack.volumeOpen = "";
+  Object.keys(AUDIO_CHANNEL_CONFIG).forEach((type) => {
+    const channel = getAudioChannel(type);
+    clearSoundtrackRecovery(type);
+    cancelStandbyPreload(type);
+    state.soundtrack.queues[type] = [];
+    channel.syncToken += 1;
+    channel.currentIndex = 0;
+    channel.paused = true;
+    channel.manualPause = true;
+    channel.activeKey = "";
+    channel.ready = false;
+    channel.recoveryAttempts = 0;
+    channel.cueMode = false;
+    channel.youtubePlayer?.pauseVideo?.();
+  });
   clearSoundtrackUi();
   saveStoredSoundtrackState();
 }
 
-function renderMusicCue(trackId, soundtrackLabels, showMusicCues) {
+function renderMusicCue(trackId, soundtrackLabels, showMusicCues, cueIndex = -1) {
   const cleanId = String(trackId ?? "").trim();
   if (!cleanId) {
     return "";
   }
 
-  const label = soundtrackLabels.get(cleanId) ?? cleanId;
+  const metadata = soundtrackLabels.get(cleanId) ?? { label: cleanId, trackType: "soundtrack" };
+  const label = metadata.label ?? cleanId;
+  const trackType = normalizeAudioTrackType(metadata.trackType);
   if (!showMusicCues) {
-    return `<span class="music-cue" data-music-trigger="${escapeHtml(cleanId)}"></span>`;
+    return `<span class="music-cue track-${trackType}" data-music-trigger="${escapeHtml(cleanId)}" data-music-cue-index="${cueIndex}"></span>`;
   }
 
   return `
-    <span class="music-cue is-visible" data-music-trigger="${escapeHtml(cleanId)}">
-      <button class="music-cue-play" type="button" data-action="play-music-cue" data-music-trigger="${escapeHtml(cleanId)}" title="Play ${escapeHtml(label)}">▶</button>
-      <span>Music cue: ${escapeHtml(label)}</span>
+    <span class="music-cue is-visible track-${trackType}" data-music-trigger="${escapeHtml(cleanId)}" data-music-cue-index="${cueIndex}">
+      <button class="music-cue-play" type="button" data-action="play-music-cue" data-music-trigger="${escapeHtml(cleanId)}" data-music-cue-index="${cueIndex}" title="Play ${escapeHtml(label)}">▶</button>
+      <span>${escapeHtml(AUDIO_CHANNEL_CONFIG[trackType].label)}: ${escapeHtml(label)}</span>
+    </span>
+  `;
+}
+
+function renderMusicEndCue(trackType, showMusicCues, cueIndex = -1) {
+  const type = String(trackType ?? "").trim().toLowerCase();
+  if (!["soundtrack", "ambience"].includes(type)) {
+    return `<span class="music-end-cue is-invalid">Unknown music track: ${escapeHtml(type)}</span>`;
+  }
+
+  if (!showMusicCues) {
+    return `<span class="music-end-cue track-${type}" data-music-end="${type}" data-music-cue-index="${cueIndex}"></span>`;
+  }
+
+  return `
+    <span class="music-end-cue is-visible track-${type}" data-music-end="${type}" data-music-cue-index="${cueIndex}">
+      <span aria-hidden="true">■</span>
+      <span>End ${escapeHtml(AUDIO_CHANNEL_CONFIG[type].label)}</span>
     </span>
   `;
 }
@@ -1181,8 +1588,21 @@ function renderMarkdown(markdown, options = {}) {
   const linked = imageified.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   const bolded = linked.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   const italicized = bolded.replace(/\*(.+?)\*/g, "<em>$1</em>");
+  const cueIndexes = { soundtrack: 0, ambience: 0 };
   const musicMarked = italicized
-    .replace(/\[music:\s*([^\]]+)\]/gi, (_, trackId) => renderMusicCue(trackId, soundtrackLabels, showMusicCues))
+    .replace(/\[(music|music-end):\s*([^\]]+)\]/gi, (_, markerType, value) => {
+      if (markerType.toLowerCase() === "music-end") {
+        const trackType = String(value).trim().toLowerCase();
+        const cueIndex = Object.hasOwn(cueIndexes, trackType) ? cueIndexes[trackType]++ : -1;
+        return renderMusicEndCue(trackType, showMusicCues, cueIndex);
+      }
+
+      const trackId = String(value).trim();
+      const metadata = soundtrackLabels.get(trackId);
+      const trackType = normalizeAudioTrackType(metadata?.trackType);
+      const cueIndex = metadata && Object.hasOwn(cueIndexes, trackType) ? cueIndexes[trackType]++ : -1;
+      return renderMusicCue(trackId, soundtrackLabels, showMusicCues, cueIndex);
+    })
     .replace(/\[video:\s*([^\]]+)\]/gi, (_, videoId) => renderVideoEmbed(videoId, videos));
   const headings = musicMarked
     .replace(/^### (.*)$/gm, "<h3>$1</h3>")
@@ -1275,6 +1695,7 @@ function getChapterTextStats(body = "", mode = "markdown") {
     text = text
       .replace(/```[\s\S]*?```/g, " ")
       .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+      .replace(/\[music-end:\s*[^\]]+\]/gi, " ")
       .replace(/\[music:\s*[^\]]+\]/gi, " ")
       .replace(/\[video:\s*[^\]]+\]/gi, " ")
       .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
@@ -1609,6 +2030,7 @@ async function getChapterEditorPatch(chapter, overrides = {}) {
     dmNotes: document.querySelector("#chapter-dm-notes-input")?.value ?? chapter.dmNotes ?? "",
     renderMode: draft.renderMode,
     htmlBackground: draft.htmlBackground,
+    audioSettings: getCurrentAudioSettings(chapter),
     ...overrides,
   };
 }
@@ -1620,9 +2042,12 @@ function updateChapterPreviewFromEditor() {
   }
 
   const draft = getEditorChapterDraft();
+  draft.soundtracks = Object.values(state.soundtrack.queues).flat();
   preview.dataset.previewMode = draft.renderMode;
-  preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*");
+  preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*", { showMusicCues: true });
   initializeChapterImageViews(preview);
+  clearSoundtrackCueObserver();
+  observeSoundtrackCues();
   const statsNode = document.querySelector("#chapter-text-stats");
   if (statsNode) {
     const stats = getChapterTextStats(draft.body, draft.renderMode);
@@ -2411,24 +2836,49 @@ function renderSoundtrackPanel(chapter) {
       <div class="inline-form soundtrack-form">
         <input id="soundtrack-label-input" placeholder="Optional label, for example Tavern Theme" />
         <input id="soundtrack-url-input" placeholder="https://youtube.com/... or https://youtu.be/..." />
+        <select id="soundtrack-track-type-input" aria-label="Audio track">
+          <option value="soundtrack" selected>Soundtrack</option>
+          <option value="ambience">Ambience</option>
+          <option value="sound-effect">Sound Effect</option>
+        </select>
         <button class="ghost-button" data-action="add-soundtrack" data-chapter-id="${chapter.id}">Add soundtrack</button>
       </div>
       <div class="soundtrack-list">
         ${
           soundtracks.length
-            ? soundtracks.map((track) => `
-                <article class="soundtrack-item">
+            ? soundtracks.map((track) => {
+              const trackType = normalizeAudioTrackType(track.trackType);
+              const multiplier = clampVolumeMultiplier(track.volumeMultiplier);
+              return `
+                <article class="soundtrack-item track-${trackType}">
                   <div>
                     <strong>${escapeHtml(track.label?.trim() || "Untitled soundtrack")}</strong>
+                    <span class="audio-track-pill">${escapeHtml(AUDIO_CHANNEL_CONFIG[trackType].label)}</span>
                     ${markdownMode ? `<div class="muted mono">[music: ${escapeHtml(track.id)}]</div>` : ""}
                     <div class="muted mono">${escapeHtml(track.url ?? "")}</div>
                   </div>
+                  <div class="soundtrack-settings">
+                    <label>
+                      <span>Track</span>
+                      <select data-action="update-soundtrack-setting" data-setting="trackType" data-chapter-id="${chapter.id}" data-soundtrack-id="${track.id}">
+                        <option value="soundtrack" ${trackType === "soundtrack" ? "selected" : ""}>Soundtrack</option>
+                        <option value="ambience" ${trackType === "ambience" ? "selected" : ""}>Ambience</option>
+                        <option value="sound-effect" ${trackType === "sound-effect" ? "selected" : ""}>Sound Effect</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Track volume <output data-track-volume-output="${track.id}">${multiplier}%</output></span>
+                      <input type="range" min="0" max="200" step="5" value="${multiplier}" data-action="update-soundtrack-setting" data-setting="volumeMultiplier" data-chapter-id="${chapter.id}" data-soundtrack-id="${track.id}" />
+                    </label>
+                  </div>
                   <div class="card-actions">
+                    <button class="small-button" data-action="preview-soundtrack" data-soundtrack-id="${track.id}" aria-pressed="false">Preview</button>
                     ${markdownMode ? `<button class="small-button" data-action="copy-soundtrack-marker" data-soundtrack-id="${track.id}">Copy cue</button>` : ""}
                     <button class="danger-button" data-action="delete-soundtrack" data-chapter-id="${chapter.id}" data-soundtrack-id="${track.id}">Remove</button>
                   </div>
                 </article>
-              `).join("")
+              `;
+            }).join("")
             : '<div class="empty-state">No soundtrack links yet.</div>'
         }
       </div>
@@ -2527,47 +2977,62 @@ function renderChapterEngagementPanel(chapter, editable = false) {
   `;
 }
 
-function renderChapterQuickTools(soundtrackQueue) {
+function renderChapterQuickTools(soundtrackQueue, chapter) {
   if (!soundtrackQueue.length) {
     return "";
   }
 
-  const active = getActiveSoundtrack();
-  const volume = clampVolume(state.soundtrack.volume);
+  const settings = state.soundtrack.chapterId === chapter.id
+    ? getCurrentAudioSettings(chapter)
+    : normalizeAudioSettings(chapter.audioSettings);
+  const volumes = {
+    master: settings.masterVolume,
+    soundtrack: settings.soundtrackVolume,
+    ambience: settings.ambienceVolume,
+    "sound-effect": settings.soundEffectVolume,
+  };
+  const queueTypes = new Set(soundtrackQueue.map((track) => track.trackType));
+  const renderVolumeControl = (scope, label, icon) => `
+    <button
+      class="quick-tool-button volume-button track-${scope} ${state.soundtrack.volumeOpen === scope ? "is-open" : ""}"
+      data-action="toggle-audio-volume"
+      data-audio-volume="${scope}"
+      data-wheel-volume="true"
+      style="--volume-fill: ${volumes[scope]}%;"
+      title="${escapeHtml(label)} volume ${volumes[scope]}%"
+      ${scope !== "master" && !queueTypes.has(scope) ? "disabled" : ""}
+    ><span class="quick-tool-icon">${icon}</span></button>
+    <div class="volume-popout" data-volume-popout="${scope}" ${state.soundtrack.volumeOpen === scope ? "" : "hidden"}>
+      <strong>${escapeHtml(label)}</strong>
+      <input class="volume-slider" type="range" min="0" max="100" step="1" value="${volumes[scope]}" data-action="set-audio-volume" data-audio-volume="${scope}" />
+      <div class="quick-tool-status" data-audio-volume-value="${scope}">${volumes[scope]}%</div>
+    </div>
+  `;
+  const renderChannelPlay = (type, icon) => {
+    const channel = getAudioChannel(type);
+    const active = state.soundtrack.chapterId === chapter.id ? getActiveSoundtrack(type) : null;
+    return `
+      <button
+        class="quick-tool-button audio-play-button track-${type} ${active && !channel.paused ? "is-active" : ""}"
+        data-action="toggle-audio-channel"
+        data-audio-channel="${type}"
+        aria-pressed="${String(Boolean(active) && !channel.paused)}"
+        title="${escapeHtml(`${channel.paused ? "Play" : "Pause"} ${AUDIO_CHANNEL_CONFIG[type].label}`)}"
+        ${queueTypes.has(type) ? "" : "disabled"}
+      ><span class="quick-tool-icon">${icon}</span></button>
+    `;
+  };
   return `
     <div class="quick-tool-stack">
-      <button
-        class="quick-tool-button ${active && !state.soundtrack.paused ? "is-active" : ""}"
-        data-action="toggle-soundtrack"
-        aria-pressed="${String(Boolean(active) && !state.soundtrack.paused)}"
-        title="${escapeHtml(active ? `${state.soundtrack.paused ? "Resume" : "Pause"} ${active.label}` : "No soundtrack available")}"
-      >
-        <span class="quick-tool-icon">♪</span>
-      </button>
-      <button
-        class="quick-tool-button volume-button ${state.soundtrack.volumeOpen ? "is-open" : ""}"
-        data-action="toggle-volume-popout"
-        data-wheel-volume="true"
-        style="--volume-fill: ${volume}%;"
-        title="${escapeHtml(active ? `Volume ${volume}%` : "No soundtrack available")}"
-      >
-        <span class="quick-tool-icon">◔</span>
-      </button>
-      <div class="volume-popout" ${state.soundtrack.volumeOpen ? "" : "hidden"}>
-        <input
-          id="soundtrack-volume-slider"
-          class="volume-slider"
-          type="range"
-          min="0"
-          max="100"
-          step="1"
-          value="${volume}"
-          data-action="set-volume"
-        />
-        <div id="soundtrack-volume-value" class="quick-tool-status">${volume}%</div>
-      </div>
-      <div class="quick-tool-caption">Music</div>
-      <div id="soundtrack-status" class="quick-tool-status">${escapeHtml(active ? `${state.soundtrack.paused ? "Paused" : "Now playing"}: ${active.label}` : "No soundtrack loaded.")}</div>
+      ${renderVolumeControl("master", "Master", "M")}
+      ${renderChannelPlay("soundtrack", "♪")}
+      ${renderVolumeControl("soundtrack", "Soundtrack", "S")}
+      ${renderChannelPlay("ambience", "≈")}
+      ${renderVolumeControl("ambience", "Ambience", "A")}
+      ${renderVolumeControl("sound-effect", "Sound Effect", "FX")}
+      <div class="audio-channel-status" data-audio-status="soundtrack"></div>
+      <div class="audio-channel-status" data-audio-status="ambience"></div>
+      <div class="audio-channel-status" data-audio-status="sound-effect"></div>
     </div>
   `;
 }
@@ -2724,7 +3189,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
   const assets = chapter.assets ?? [];
   const renderMode = getChapterRenderMode(chapter);
   const htmlBackground = getChapterHtmlBackground(chapter);
-  const soundtrackQueue = browserView ? buildSoundtrackQueue(chapter.soundtracks ?? []) : [];
+  const soundtrackQueue = buildSoundtrackQueue(chapter.soundtracks ?? []);
   const readableChapters = (arc.chapters ?? []).filter((entry) => canReadChapter(entry, editable, browserView));
   const chapterIndex = readableChapters.findIndex((entry) => entry.id === chapterId);
   const previousChapter = chapterIndex > 0 ? readableChapters[chapterIndex - 1] : null;
@@ -2813,7 +3278,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
           <section class="preview-pane">
             <h3>Preview</h3>
             ${renderChapterStats(chapter)}
-            <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*")}</div>
+            <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*", { showMusicCues: true })}</div>
           </section>
         </div>
       `
@@ -2855,11 +3320,15 @@ async function renderChapterPage(storyId, arcId, chapterId) {
       </div>
     `,
     browserView ? "browser" : editable ? "creator" : "browser",
-    renderChapterQuickTools(soundtrackQueue),
+    renderChapterQuickTools(soundtrackQueue, chapter),
   );
 
-  if (browserView && soundtrackQueue.length) {
-    activateSoundtrackQueue(chapter.id, soundtrackQueue, { waitForCue: hasMarkdownMusicMarkers(chapter) });
+  if (soundtrackQueue.length) {
+    activateSoundtrackQueue(chapter.id, soundtrackQueue, {
+      body: chapter.body,
+      audioSettings: chapter.audioSettings,
+      editorMode: editable && !browserView,
+    });
   } else {
     deactivateSoundtrackQueue();
   }
@@ -3631,7 +4100,10 @@ document.addEventListener("click", async (event) => {
   if (action === "play-music-cue") {
     const trackId = actionTarget.dataset.musicTrigger;
     if (trackId) {
-      playSoundtrackById(trackId, { source: "button" });
+      playSoundtrackById(trackId, {
+        source: "button",
+        cueIndex: Number(actionTarget.dataset.musicCueIndex ?? -1),
+      });
     }
     return;
   }
@@ -3831,21 +4303,20 @@ document.addEventListener("click", async (event) => {
     const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
     const label = document.querySelector("#soundtrack-label-input")?.value.trim() ?? "";
     const url = document.querySelector("#soundtrack-url-input")?.value.trim() ?? "";
-    const parsed = parseSoundtrackEntry({ id: makeClientId("soundtrack"), label, url });
+    const trackType = normalizeAudioTrackType(document.querySelector("#soundtrack-track-type-input")?.value);
+    const parsed = parseSoundtrackEntry({ id: makeClientId("soundtrack"), label, url, trackType, volumeMultiplier: 100 });
     if (!parsed) {
       state.saveStatus = "Please enter a valid YouTube link.";
       return render();
     }
-    const draft = getEditorChapterDraft();
-    await state.adapter.updateChapter(chapter.id, {
-      title: document.querySelector("#chapter-title-input")?.value.trim() || chapter.title || "Untitled Chapter",
-      body: draft.body,
-      published: document.querySelector("#chapter-published-input")?.checked ?? isChapterPublished(chapter),
-      dmNotes: document.querySelector("#chapter-dm-notes-input")?.value ?? chapter.dmNotes ?? "",
-      renderMode: draft.renderMode,
-      htmlBackground: draft.htmlBackground,
-      soundtracks: [...(chapter.soundtracks ?? []), { id: parsed.id, label: parsed.label, url: parsed.url }],
-    });
+    const soundtracks = [...(chapter.soundtracks ?? []), {
+      id: parsed.id,
+      label: parsed.label,
+      url: parsed.url,
+      trackType: parsed.trackType,
+      volumeMultiplier: parsed.volumeMultiplier,
+    }];
+    await state.adapter.updateChapter(chapter.id, await getChapterEditorPatch(chapter, { soundtracks }));
     state.saveStatus = "Soundtrack added.";
     return render();
   }
@@ -3865,11 +4336,31 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "preview-soundtrack") {
+    const trackId = actionTarget.dataset.soundtrackId;
+    const track = Object.values(state.soundtrack.queues).flat().find((entry) => entry.id === trackId);
+    if (!track) {
+      state.saveStatus = "This audio track is not available for preview.";
+      return render();
+    }
+
+    const channel = getAudioChannel(track.trackType);
+    if (channel.activeKey === track.id && !channel.paused) {
+      pauseCurrentSoundtrack(track.trackType);
+      setSoundtrackStatus(track.trackType, `Preview stopped: ${track.label}`);
+      return;
+    }
+
+    playSoundtrackById(track.id, { source: "button" });
+    setSoundtrackStatus(track.trackType, `Previewing: ${track.label}`);
+    return;
+  }
+
   if (action === "delete-soundtrack") {
     const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
-    await state.adapter.updateChapter(chapter.id, {
+    await state.adapter.updateChapter(chapter.id, await getChapterEditorPatch(chapter, {
       soundtracks: (chapter.soundtracks ?? []).filter((track) => track.id !== actionTarget.dataset.soundtrackId),
-    });
+    }));
     state.saveStatus = "Soundtrack removed.";
     return render();
   }
@@ -4281,25 +4772,23 @@ document.addEventListener("click", async (event) => {
     }
   }
 
-  if (action === "toggle-soundtrack") {
-    if (!getActiveSoundtrack()) {
+  if (action === "toggle-audio-channel") {
+    const type = normalizeAudioTrackType(actionTarget.dataset.audioChannel);
+    if (!getActiveSoundtrack(type)) {
       return;
     }
 
-    if (state.soundtrack.paused) {
-      playCurrentSoundtrack();
+    if (getAudioChannel(type).paused) {
+      playCurrentSoundtrack(type);
     } else {
-      pauseCurrentSoundtrack();
+      pauseCurrentSoundtrack(type);
     }
     return;
   }
 
-  if (action === "toggle-volume-popout") {
-    if (!getActiveSoundtrack()) {
-      return;
-    }
-
-    state.soundtrack.volumeOpen = !state.soundtrack.volumeOpen;
+  if (action === "toggle-audio-volume") {
+    const scope = actionTarget.dataset.audioVolume;
+    state.soundtrack.volumeOpen = state.soundtrack.volumeOpen === scope ? "" : scope;
     updateQuickToolButton();
     return;
   }
@@ -4307,6 +4796,23 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("change", async (event) => {
   const target = event.target;
+  if (
+    (target instanceof HTMLInputElement || target instanceof HTMLSelectElement)
+    && target.dataset.action === "update-soundtrack-setting"
+  ) {
+    const chapter = await state.adapter.getChapter(target.dataset.chapterId);
+    const soundtracks = (chapter.soundtracks ?? []).map((track) => {
+      if (track.id !== target.dataset.soundtrackId) return track;
+      if (target.dataset.setting === "trackType") {
+        return { ...track, trackType: normalizeAudioTrackType(target.value) };
+      }
+      return { ...track, volumeMultiplier: clampVolumeMultiplier(target.value) };
+    });
+    await state.adapter.updateChapter(chapter.id, await getChapterEditorPatch(chapter, { soundtracks }));
+    state.saveStatus = "Audio track settings saved.";
+    return render();
+  }
+
   if (target instanceof HTMLInputElement && target.id === "docx-import-input") {
     const file = target.files?.[0];
     target.value = "";
@@ -4354,8 +4860,14 @@ document.addEventListener("input", (event) => {
     return;
   }
 
-  if (event.target instanceof HTMLInputElement && event.target.dataset.action === "set-volume") {
-    setSoundtrackVolume(event.target.value);
+  if (event.target instanceof HTMLInputElement && event.target.dataset.action === "set-audio-volume") {
+    setAudioVolume(event.target.dataset.audioVolume, event.target.value);
+    return;
+  }
+
+  if (event.target instanceof HTMLInputElement && event.target.dataset.action === "update-soundtrack-setting") {
+    const output = document.querySelector(`[data-track-volume-output='${event.target.dataset.soundtrackId}']`);
+    if (output) output.textContent = `${clampVolumeMultiplier(event.target.value)}%`;
     return;
   }
 
@@ -4385,7 +4897,7 @@ document.addEventListener("click", (event) => {
 
   if (!target.closest(".quick-tool-stack")) {
     if (state.soundtrack.volumeOpen) {
-      state.soundtrack.volumeOpen = false;
+      state.soundtrack.volumeOpen = "";
       updateQuickToolButton();
     }
   }
@@ -4401,12 +4913,9 @@ document.addEventListener("wheel", (event) => {
     return;
   }
 
-  if (!getActiveSoundtrack()) {
-    return;
-  }
-
   event.preventDefault();
-  adjustSoundtrackVolume(event.deltaY < 0 ? 5 : -5);
+  const button = target.closest("[data-wheel-volume='true']");
+  adjustAudioVolume(button.dataset.audioVolume, event.deltaY < 0 ? 5 : -5);
 }, { passive: false });
 
 document.addEventListener("dragover", (event) => {
