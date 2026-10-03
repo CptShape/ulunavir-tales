@@ -1585,7 +1585,14 @@ textarea::placeholder {
   color: #f3d889;
 }
 
-.music-cue-play {
+.music-end-cue.track-ambience .music-cue-stop {
+  border-color: rgba(199, 222, 242, 0.38);
+  background: rgba(101, 159, 212, 0.16);
+  color: #c7def2;
+}
+
+.music-cue-play,
+.music-cue-stop {
   display: inline-grid;
   place-items: center;
   width: 1.35em;
@@ -1602,7 +1609,8 @@ textarea::placeholder {
   cursor: pointer;
 }
 
-.music-cue-play:hover {
+.music-cue-play:hover,
+.music-cue-stop:hover {
   transform: translateY(-1px);
   border-color: rgba(216, 229, 199, 0.62);
   background: rgba(216, 229, 199, 0.2);

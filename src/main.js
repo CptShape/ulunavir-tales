@@ -1522,7 +1522,7 @@ function renderMusicEndCue(trackType, showMusicCues, cueIndex = -1) {
 
   return `
     <span class="music-end-cue is-visible track-${type}" data-music-end="${type}" data-music-cue-index="${cueIndex}">
-      <span aria-hidden="true">■</span>
+      <button class="music-cue-stop" type="button" data-action="stop-music-cue" data-music-end="${type}" data-music-cue-index="${cueIndex}" title="Stop ${escapeHtml(AUDIO_CHANNEL_CONFIG[type].label)}">■</button>
       <span>End ${escapeHtml(AUDIO_CHANNEL_CONFIG[type].label)}</span>
     </span>
   `;
@@ -4306,6 +4306,14 @@ document.addEventListener("click", async (event) => {
         source: "button",
         cueIndex: Number(actionTarget.dataset.musicCueIndex ?? -1),
       });
+    }
+    return;
+  }
+
+  if (action === "stop-music-cue") {
+    const type = String(actionTarget.dataset.musicEnd ?? "").trim().toLowerCase();
+    if (["soundtrack", "ambience"].includes(type)) {
+      stopSoundtrackAtMarker(type, Number(actionTarget.dataset.musicCueIndex ?? -1));
     }
     return;
   }
