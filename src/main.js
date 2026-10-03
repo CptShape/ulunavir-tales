@@ -47,6 +47,7 @@ const state = {
   authError: "",
   authErrorCode: "",
   loadError: "",
+  editorCharacters: [],
   soundtrack: {
     chapterId: "",
     queues: { soundtrack: [], ambience: [], "sound-effect": [] },
@@ -1571,13 +1572,60 @@ function renderMarkdownImage(alt, src) {
   return renderChapterImageFrame(`<img alt="${alt}" src="${escapeHtml(getDisplayImageUrl(src))}" />`);
 }
 
+function normalizeCharacterKey(value) {
+  return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function normalizeCharacterColor(value, fallback) {
+  const color = String(value ?? "").trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
+}
+
+function buildDialogCharacterMap(characters = []) {
+  return new Map(characters.map((character) => [normalizeCharacterKey(character.name), {
+    ...character,
+    mainColor: normalizeCharacterColor(character.mainColor, "#8f5f35"),
+    secondaryColor: normalizeCharacterColor(character.secondaryColor, "#d7b56d"),
+  }]));
+}
+
+function renderInlineDialogMarkdown(value) {
+  return escapeHtml(String(value ?? ""))
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>");
+}
+
+function renderDialogBlock(dialog, characters) {
+  const character = characters.get(normalizeCharacterKey(dialog.characterName));
+  const mainColor = normalizeCharacterColor(character?.mainColor, "#705846");
+  const secondaryColor = normalizeCharacterColor(character?.secondaryColor, "#c3a77a");
+  const displayName = dialog.displayName?.trim() || character?.name || dialog.characterName;
+  return `
+    <blockquote class="dialog-block ${character ? "" : "is-missing"}" style="--dialog-main: ${mainColor}; --dialog-secondary: ${secondaryColor};">
+      <div class="dialog-speaker">${escapeHtml(displayName)}</div>
+      <div class="dialog-message">${renderInlineDialogMarkdown(dialog.message)}</div>
+    </blockquote>
+  `;
+}
+
 function renderMarkdown(markdown, options = {}) {
   const source = String(markdown ?? "");
   const soundtrackLabels = options.soundtrackLabels ?? new Map();
   const videos = options.videos ?? new Map();
+  const characters = options.characters ?? new Map();
   const showMusicCues = Boolean(options.showMusicCues);
+  const dialogs = [];
+  const dialogProtectedSource = source.replace(
+    /^\s*\[dialog:\s*([^:\]\r\n]+?)(?:\s*:\s*([^\]\r\n]+?))?\]\s*(.*?)\s*$/gim,
+    (_, characterName, displayName, message) => {
+      const token = `ULUNAVIR_DIALOG_BLOCK_${dialogs.length}`;
+      dialogs.push({ characterName: characterName.trim(), displayName: displayName?.trim() ?? "", message });
+      return `\n\n${token}\n\n`;
+    },
+  );
   const extraBreakToken = "ULUNAVIR_SAFE_EXTRA_BREAK";
-  const normalized = source.replace(/\n{3,}/g, (match) => `\n\n${`${extraBreakToken}\n`.repeat(match.length - 2)}\n`);
+  const normalized = dialogProtectedSource.replace(/\n{3,}/g, (match) => `\n\n${`${extraBreakToken}\n`.repeat(match.length - 2)}\n`);
   let escaped = escapeHtml(normalized);
   escaped = escaped.replaceAll(extraBreakToken, "<br />");
   const fenced = escaped.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
@@ -1603,7 +1651,8 @@ function renderMarkdown(markdown, options = {}) {
       const cueIndex = metadata && Object.hasOwn(cueIndexes, trackType) ? cueIndexes[trackType]++ : -1;
       return renderMusicCue(trackId, soundtrackLabels, showMusicCues, cueIndex);
     })
-    .replace(/\[video:\s*([^\]]+)\]/gi, (_, videoId) => renderVideoEmbed(videoId, videos));
+    .replace(/\[video:\s*([^\]]+)\]/gi, (_, videoId) => renderVideoEmbed(videoId, videos))
+    .replace(/ULUNAVIR_DIALOG_BLOCK_(\d+)/g, (_, index) => renderDialogBlock(dialogs[Number(index)], characters));
   const headings = musicMarked
     .replace(/^### (.*)$/gm, "<h3>$1</h3>")
     .replace(/^## (.*)$/gm, "<h2>$1</h2>")
@@ -1681,6 +1730,7 @@ function renderChapterBody(chapter, fallback, options = {}) {
   return renderMarkdown(body, {
     soundtrackLabels: buildSoundtrackLabelMap(chapter?.soundtracks ?? []),
     videos: buildVideoMap(chapter?.videos ?? []),
+    characters: buildDialogCharacterMap(chapter?.characters ?? []),
     showMusicCues: Boolean(options.showMusicCues),
   });
 }
@@ -1698,6 +1748,7 @@ function getChapterTextStats(body = "", mode = "markdown") {
       .replace(/\[music-end:\s*[^\]]+\]/gi, " ")
       .replace(/\[music:\s*[^\]]+\]/gi, " ")
       .replace(/\[video:\s*[^\]]+\]/gi, " ")
+      .replace(/^\s*\[dialog:\s*[^\]]+\]\s*/gim, "")
       .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
       .replace(/[#>*_`~\-]/g, " ");
   }
@@ -2031,6 +2082,7 @@ async function getChapterEditorPatch(chapter, overrides = {}) {
     renderMode: draft.renderMode,
     htmlBackground: draft.htmlBackground,
     audioSettings: getCurrentAudioSettings(chapter),
+    characters: state.editorCharacters,
     ...overrides,
   };
 }
@@ -2043,6 +2095,7 @@ function updateChapterPreviewFromEditor() {
 
   const draft = getEditorChapterDraft();
   draft.soundtracks = Object.values(state.soundtrack.queues).flat();
+  draft.characters = state.editorCharacters;
   preview.dataset.previewMode = draft.renderMode;
   preview.innerHTML = renderChapterBody(draft, draft.renderMode === "html" ? "" : "*Start writing to preview your chapter here.*", { showMusicCues: true });
   initializeChapterImageViews(preview);
@@ -2821,6 +2874,63 @@ function renderPhaseHeader(phase, owner, browserView = false, arcId = "") {
   `;
 }
 
+function renderCharacterPanel(chapter) {
+  const characters = chapter.characters ?? [];
+  const markdownMode = getChapterRenderMode(chapter) === "markdown";
+  return `
+    <section class="panel stack character-panel">
+      <div class="section-header">
+        <div>
+          <h3>Characters</h3>
+          <p class="muted">Create reusable speaker colors for dialogue in this chapter.</p>
+        </div>
+        <span class="pill">${characters.length} character(s)</span>
+      </div>
+      ${markdownMode ? `
+        <div class="character-form">
+          <input id="character-name-input" placeholder="Character name, for example Serylda" />
+          <label class="character-color-control">
+            <span>Main color</span>
+            <input id="character-main-color-input" type="color" value="#8f5f35" />
+          </label>
+          <label class="character-color-control">
+            <span>Secondary color</span>
+            <input id="character-secondary-color-input" type="color" value="#d7b56d" />
+          </label>
+          <button class="ghost-button" data-action="add-character" data-chapter-id="${chapter.id}">Add character</button>
+        </div>
+        <div class="notice character-syntax"><span class="mono">Use [dialog: Serylda] Hello or [dialog: Serylda: ???] Hello.</span></div>
+      ` : '<div class="notice">Character dialogue blocks are available in Markdown Mode only.</div>'}
+      <div class="character-list">
+        ${characters.length ? characters.map((character) => {
+          const mainColor = normalizeCharacterColor(character.mainColor, "#8f5f35");
+          const secondaryColor = normalizeCharacterColor(character.secondaryColor, "#d7b56d");
+          const marker = `[dialog: ${character.name}] `;
+          return `
+            <article class="character-item" style="--character-main: ${mainColor}; --character-secondary: ${secondaryColor};">
+              <div class="character-item-header">
+                <div class="character-swatches" aria-label="Character colors">
+                  <span class="character-swatch" style="background: ${mainColor}"></span>
+                  <span class="character-swatch" style="background: ${secondaryColor}"></span>
+                </div>
+                <strong>${escapeHtml(character.name)}</strong>
+              </div>
+              <div class="muted mono">${escapeHtml(marker)}Hello</div>
+              ${markdownMode ? `
+                <div class="card-actions">
+                  <button class="small-button" data-action="insert-dialog-marker" data-character-name="${escapeHtml(character.name)}">Insert dialog</button>
+                  <button class="small-button" data-action="copy-dialog-marker" data-character-name="${escapeHtml(character.name)}">Copy</button>
+                  <button class="small-button danger-icon" title="Delete character" aria-label="Delete character" data-action="delete-character" data-chapter-id="${chapter.id}" data-character-id="${character.id}">🗑</button>
+                </div>
+              ` : ""}
+            </article>
+          `;
+        }).join("") : '<div class="empty-state">No characters in this chapter yet.</div>'}
+      </div>
+    </section>
+  `;
+}
+
 function renderSoundtrackPanel(chapter) {
   const soundtracks = chapter.soundtracks ?? [];
   const markdownMode = getChapterRenderMode(chapter) === "markdown";
@@ -3187,6 +3297,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
     return renderMissing("This chapter is still a draft.");
   }
   const assets = chapter.assets ?? [];
+  state.editorCharacters = [...(chapter.characters ?? [])];
   const renderMode = getChapterRenderMode(chapter);
   const htmlBackground = getChapterHtmlBackground(chapter);
   const soundtrackQueue = buildSoundtrackQueue(chapter.soundtracks ?? []);
@@ -3270,6 +3381,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
                   </div>
                 </div>
               ` : ""}
+              ${editable && !browserView ? renderCharacterPanel(chapter) : ""}
               ${renderVideoPanel(chapter)}
               ${renderSoundtrackPanel(chapter)}
               <div class="notice mono">${escapeHtml(state.saveStatus || "Tip: use `![alt](image-url)` to place pasted external images into the chapter body.")}</div>
@@ -4296,6 +4408,86 @@ document.addEventListener("click", async (event) => {
       ...await readCoverFormValues("arc-cover-input", "arc-cover-mode-input", arc),
     });
     state.saveStatus = "Arc details saved.";
+    return render();
+  }
+
+  if (action === "add-character") {
+    const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+    const name = document.querySelector("#character-name-input")?.value.trim() ?? "";
+    if (!name) {
+      state.saveStatus = "Enter a character name first.";
+      return render();
+    }
+    if (/[:\]]/.test(name)) {
+      state.saveStatus = "Character names cannot contain : or ].";
+      return render();
+    }
+
+    const mainColor = normalizeCharacterColor(
+      document.querySelector("#character-main-color-input")?.value,
+      "#8f5f35",
+    );
+    const secondaryColor = normalizeCharacterColor(
+      document.querySelector("#character-secondary-color-input")?.value,
+      "#d7b56d",
+    );
+    const characterKey = normalizeCharacterKey(name);
+    const existing = (chapter.characters ?? []).find((character) => normalizeCharacterKey(character.name) === characterKey);
+    const characters = existing
+      ? (chapter.characters ?? []).map((character) => (
+        character.id === existing.id ? { ...character, name, mainColor, secondaryColor } : character
+      ))
+      : [...(chapter.characters ?? []), { id: makeClientId("character"), name, mainColor, secondaryColor }];
+
+    state.editorCharacters = characters;
+    await state.adapter.updateChapter(chapter.id, await getChapterEditorPatch(chapter, { characters }));
+    state.saveStatus = existing ? `${name}'s colors were updated.` : `${name} was added to this chapter.`;
+    return render();
+  }
+
+  if (action === "insert-dialog-marker") {
+    const textarea = document.querySelector("#chapter-body-input");
+    if (!(textarea instanceof HTMLTextAreaElement) || textarea.disabled) {
+      state.saveStatus = "Dialogue markers can only be inserted in Markdown Mode.";
+      return render();
+    }
+    const name = actionTarget.dataset.characterName ?? "Character";
+    insertTextIntoTextarea(textarea, `[dialog: ${name}] `);
+    state.saveStatus = `Inserted a dialogue block for ${name}.`;
+    const statusNode = document.querySelector(".notice.mono");
+    if (statusNode) {
+      statusNode.textContent = state.saveStatus;
+    }
+    return;
+  }
+
+  if (action === "copy-dialog-marker") {
+    const name = actionTarget.dataset.characterName ?? "Character";
+    const marker = `[dialog: ${name}] `;
+    try {
+      await copyTextToClipboard(marker);
+      state.saveStatus = `Copied dialogue marker for ${name}.`;
+    } catch (error) {
+      state.saveStatus = `Copy failed. Use this marker manually: ${marker}`;
+    }
+    const statusNode = document.querySelector(".notice.mono");
+    if (statusNode) {
+      statusNode.textContent = state.saveStatus;
+    }
+    return;
+  }
+
+  if (action === "delete-character") {
+    if (!confirmDelete("character")) {
+      return;
+    }
+    const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+    const characters = (chapter.characters ?? []).filter(
+      (character) => character.id !== actionTarget.dataset.characterId,
+    );
+    state.editorCharacters = characters;
+    await state.adapter.updateChapter(chapter.id, await getChapterEditorPatch(chapter, { characters }));
+    state.saveStatus = "Character removed. Existing dialogue text was kept and will use neutral colors.";
     return render();
   }
 

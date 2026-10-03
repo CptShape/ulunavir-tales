@@ -158,6 +158,12 @@ function normalizeChapter(chapter) {
     comments: chapter.comments ?? [],
     reactions: chapter.reactions ?? {},
     assets: chapter.assets ?? [],
+    characters: (chapter.characters ?? []).map((character) => ({
+      id: character.id ?? makeId("character"),
+      name: character.name?.trim() || "Unnamed Character",
+      mainColor: /^#[0-9a-f]{6}$/i.test(character.mainColor ?? "") ? character.mainColor : "#8f5f35",
+      secondaryColor: /^#[0-9a-f]{6}$/i.test(character.secondaryColor ?? "") ? character.secondaryColor : "#d7b56d",
+    })),
     soundtracks: (chapter.soundtracks ?? []).map((track) => ({
       ...track,
       trackType: ["soundtrack", "ambience", "sound-effect"].includes(track.trackType) ? track.trackType : "soundtrack",
@@ -628,6 +634,7 @@ function createLocalAdapter() {
         renderMode: "markdown",
         htmlBackground: "",
         assets: [],
+        characters: [],
         soundtracks: [],
         audioSettings: {
           masterVolume: 100,
@@ -1380,6 +1387,7 @@ function createFirebaseAdapter(authClient) {
         renderMode: "markdown",
         htmlBackground: "",
         assets: [],
+        characters: [],
         soundtracks: [],
         audioSettings: {
           masterVolume: 100,
