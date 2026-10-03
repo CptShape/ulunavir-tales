@@ -158,12 +158,16 @@ function normalizeChapter(chapter) {
     comments: chapter.comments ?? [],
     reactions: chapter.reactions ?? {},
     assets: chapter.assets ?? [],
-    characters: (chapter.characters ?? []).map((character) => ({
-      id: character.id ?? makeId("character"),
-      name: character.name?.trim() || "Unnamed Character",
-      mainColor: /^#[0-9a-f]{6}$/i.test(character.mainColor ?? "") ? character.mainColor : "#8f5f35",
-      secondaryColor: /^#[0-9a-f]{6}$/i.test(character.secondaryColor ?? "") ? character.secondaryColor : "#d7b56d",
-    })),
+    characters: (chapter.characters ?? []).map((character) => {
+      const legacyName = character.name?.trim() || "character";
+      return {
+        id: character.id ?? makeId("character"),
+        dialogId: character.dialogId?.trim() || legacyName,
+        displayName: character.displayName?.trim() || legacyName,
+        mainColor: /^#[0-9a-f]{6}$/i.test(character.mainColor ?? "") ? character.mainColor : "#8f5f35",
+        secondaryColor: /^#[0-9a-f]{6}$/i.test(character.secondaryColor ?? "") ? character.secondaryColor : "#d7b56d",
+      };
+    }),
     soundtracks: (chapter.soundtracks ?? []).map((track) => ({
       ...track,
       trackType: ["soundtrack", "ambience", "sound-effect"].includes(track.trackType) ? track.trackType : "soundtrack",

@@ -1576,13 +1576,17 @@ function normalizeCharacterKey(value) {
   return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function normalizeCharacterColor(value, fallback) {
   const color = String(value ?? "").trim();
   return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
 }
 
 function buildDialogCharacterMap(characters = []) {
-  return new Map(characters.map((character) => [normalizeCharacterKey(character.name), {
+  return new Map(characters.map((character) => [normalizeCharacterKey(character.dialogId ?? character.name), {
     ...character,
     mainColor: normalizeCharacterColor(character.mainColor, "#8f5f35"),
     secondaryColor: normalizeCharacterColor(character.secondaryColor, "#d7b56d"),
@@ -1600,7 +1604,7 @@ function renderDialogBlock(dialog, characters) {
   const character = characters.get(normalizeCharacterKey(dialog.characterName));
   const mainColor = normalizeCharacterColor(character?.mainColor, "#705846");
   const secondaryColor = normalizeCharacterColor(character?.secondaryColor, "#c3a77a");
-  const displayName = dialog.displayName?.trim() || character?.name || dialog.characterName;
+  const displayName = dialog.displayName?.trim() || character?.displayName || character?.name || dialog.characterName;
   return `
     <blockquote class="dialog-block ${character ? "" : "is-missing"}" style="--dialog-main: ${mainColor}; --dialog-secondary: ${secondaryColor};">
       <div class="dialog-speaker">${escapeHtml(displayName)}</div>
@@ -2280,6 +2284,7 @@ function layout(content, activeTab, quickToolsContent = "") {
   }
 
   initializeChapterImageViews();
+  initializeEditorAnimatedAssetPreviews();
 }
 
 function setChapterImageView(frame, mode, explicit = true) {
@@ -2324,6 +2329,68 @@ function initializeChapterImageViews(root = document) {
     }
 
     image.addEventListener("load", () => applyAutomaticChapterImageView(frame), { once: true });
+  });
+}
+
+const TRANSPARENT_ASSET_PIXEL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
+function isAnimatedEditorAssetUrl(url) {
+  return /\.(gif|webp)(?:$|[?#])/i.test(String(url ?? ""));
+}
+
+async function prepareAnimatedAssetStill(container) {
+  const source = container.dataset.animatedSrc;
+  const canvas = container.querySelector("canvas");
+  if (!source || !(canvas instanceof HTMLCanvasElement) || typeof createImageBitmap !== "function") {
+    container.classList.add("has-no-still");
+    return;
+  }
+
+  try {
+    const response = await fetch(source, { mode: "cors", cache: "force-cache" });
+    if (!response.ok) {
+      throw new Error(`Image preview returned ${response.status}.`);
+    }
+    const bitmap = await createImageBitmap(await response.blob());
+    const size = 320;
+    const scale = Math.max(size / bitmap.width, size / bitmap.height);
+    const width = bitmap.width * scale;
+    const height = bitmap.height * scale;
+    const context = canvas.getContext("2d");
+    canvas.width = size;
+    canvas.height = size;
+    context.drawImage(bitmap, (size - width) / 2, (size - height) / 2, width, height);
+    bitmap.close?.();
+    container.classList.add("has-still");
+  } catch (error) {
+    container.classList.add("has-no-still");
+  }
+}
+
+function initializeEditorAnimatedAssetPreviews(root = document) {
+  root.querySelectorAll("[data-animated-asset-preview]").forEach((container) => {
+    if (container.dataset.previewInitialized === "true") {
+      return;
+    }
+    container.dataset.previewInitialized = "true";
+    const image = container.querySelector(".asset-animated-live");
+    const source = container.dataset.animatedSrc;
+    if (!(image instanceof HTMLImageElement) || !source) {
+      return;
+    }
+
+    prepareAnimatedAssetStill(container);
+    container.addEventListener("pointerenter", () => {
+      container.classList.remove("is-live-ready");
+      image.onload = () => container.classList.add("is-live-ready");
+      image.src = source;
+      container.classList.add("is-playing");
+    });
+    container.addEventListener("pointerleave", () => {
+      container.classList.remove("is-playing", "is-live-ready");
+      image.onload = null;
+      image.src = TRANSPARENT_ASSET_PIXEL;
+    });
   });
 }
 
@@ -2888,7 +2955,9 @@ function renderCharacterPanel(chapter) {
       </div>
       ${markdownMode ? `
         <div class="character-form">
-          <input id="character-name-input" placeholder="Character name, for example Serylda" />
+          <input id="character-record-id-input" type="hidden" value="" />
+          <input id="character-display-name-input" placeholder="Display name, for example Julius Vane" />
+          <input id="character-dialog-id-input" placeholder="Dialogue ID, for example jv" />
           <label class="character-color-control">
             <span>Main color</span>
             <input id="character-main-color-input" type="color" value="#8f5f35" />
@@ -2897,15 +2966,20 @@ function renderCharacterPanel(chapter) {
             <span>Secondary color</span>
             <input id="character-secondary-color-input" type="color" value="#d7b56d" />
           </label>
-          <button class="ghost-button" data-action="add-character" data-chapter-id="${chapter.id}">Add character</button>
+          <div class="character-form-actions">
+            <button id="save-character-button" class="ghost-button" data-action="add-character" data-chapter-id="${chapter.id}">Add character</button>
+            <button id="cancel-character-edit-button" class="small-button" data-action="cancel-character-edit" type="button" hidden>Cancel</button>
+          </div>
         </div>
-        <div class="notice character-syntax"><span class="mono">Use [dialog: Serylda] Hello or [dialog: Serylda: ???] Hello.</span></div>
+        <div class="notice character-syntax"><span class="mono">Use [dialog: jv] Hello or [dialog: jv: ???] Hello.</span></div>
       ` : '<div class="notice">Character dialogue blocks are available in Markdown Mode only.</div>'}
       <div class="character-list">
         ${characters.length ? characters.map((character) => {
           const mainColor = normalizeCharacterColor(character.mainColor, "#8f5f35");
           const secondaryColor = normalizeCharacterColor(character.secondaryColor, "#d7b56d");
-          const marker = `[dialog: ${character.name}] `;
+          const dialogId = character.dialogId ?? character.name;
+          const displayName = character.displayName ?? character.name ?? dialogId;
+          const marker = `[dialog: ${dialogId}] `;
           return `
             <article class="character-item" style="--character-main: ${mainColor}; --character-secondary: ${secondaryColor};">
               <div class="character-item-header">
@@ -2913,13 +2987,17 @@ function renderCharacterPanel(chapter) {
                   <span class="character-swatch" style="background: ${mainColor}"></span>
                   <span class="character-swatch" style="background: ${secondaryColor}"></span>
                 </div>
-                <strong>${escapeHtml(character.name)}</strong>
+                <div>
+                  <strong>${escapeHtml(displayName)}</strong>
+                  <div class="muted mono">ID: ${escapeHtml(dialogId)}</div>
+                </div>
               </div>
               <div class="muted mono">${escapeHtml(marker)}Hello</div>
               ${markdownMode ? `
                 <div class="card-actions">
-                  <button class="small-button" data-action="insert-dialog-marker" data-character-name="${escapeHtml(character.name)}">Insert dialog</button>
-                  <button class="small-button" data-action="copy-dialog-marker" data-character-name="${escapeHtml(character.name)}">Copy</button>
+                  <button class="small-button" data-action="insert-dialog-marker" data-character-id="${escapeHtml(dialogId)}">Insert dialog</button>
+                  <button class="small-button" data-action="copy-dialog-marker" data-character-id="${escapeHtml(dialogId)}">Copy</button>
+                  <button class="small-button" data-action="edit-character" data-character-record-id="${character.id}" data-character-dialog-id="${escapeHtml(dialogId)}" data-character-display-name="${escapeHtml(displayName)}" data-character-main-color="${mainColor}" data-character-secondary-color="${secondaryColor}">Edit</button>
                   <button class="small-button danger-icon" title="Delete character" aria-label="Delete character" data-action="delete-character" data-chapter-id="${chapter.id}" data-character-id="${character.id}">🗑</button>
                 </div>
               ` : ""}
@@ -3450,7 +3528,19 @@ function renderAssetItem(asset, index = 0, options = {}) {
   const sourceUrl = asset.url ?? asset.dataUrl ?? "";
   const displayUrl = sourceUrl ? getDisplayImageUrl(sourceUrl) : "";
   const previewable = Boolean(sourceUrl);
+  const hoverAnimated = options.editable && isAnimatedEditorAssetUrl(displayUrl);
   const markdown = `![${asset.name}](${displayUrl})`;
+  const preview = !previewable
+    ? ""
+    : hoverAnimated
+      ? `
+          <div class="asset-animated-media" data-animated-asset-preview data-animated-src="${escapeHtml(displayUrl)}">
+            <canvas aria-hidden="true"></canvas>
+            <img class="asset-animated-live" src="${TRANSPARENT_ASSET_PIXEL}" alt="${escapeHtml(asset.name)}" />
+            <span class="asset-animation-badge">Hover to animate</span>
+          </div>
+        `
+      : `<img src="${escapeHtml(displayUrl)}" alt="${escapeHtml(asset.name)}" />`;
   const actions = options.editable
     ? `
         <div class="asset-actions">
@@ -3467,7 +3557,7 @@ function renderAssetItem(asset, index = 0, options = {}) {
   return `
     <article class="asset-item">
       ${actions}
-      ${previewable ? `<img src="${escapeHtml(displayUrl)}" alt="${escapeHtml(asset.name)}" />` : ""}
+      ${preview}
       <strong title="${escapeHtml(asset.name)}">${escapeHtml(asset.name)}</strong>
       <div class="muted mono asset-markdown" title="${escapeHtml(markdown)}">${escapeHtml(markdown)}</div>
     </article>
@@ -4411,15 +4501,58 @@ document.addEventListener("click", async (event) => {
     return render();
   }
 
+  if (action === "edit-character") {
+    const recordInput = document.querySelector("#character-record-id-input");
+    const displayNameInput = document.querySelector("#character-display-name-input");
+    const dialogIdInput = document.querySelector("#character-dialog-id-input");
+    const mainColorInput = document.querySelector("#character-main-color-input");
+    const secondaryColorInput = document.querySelector("#character-secondary-color-input");
+    const saveButton = document.querySelector("#save-character-button");
+    const cancelButton = document.querySelector("#cancel-character-edit-button");
+    if (!recordInput || !displayNameInput || !dialogIdInput || !mainColorInput || !secondaryColorInput) {
+      return;
+    }
+
+    recordInput.value = actionTarget.dataset.characterRecordId ?? "";
+    displayNameInput.value = actionTarget.dataset.characterDisplayName ?? "";
+    dialogIdInput.value = actionTarget.dataset.characterDialogId ?? "";
+    mainColorInput.value = normalizeCharacterColor(actionTarget.dataset.characterMainColor, "#8f5f35");
+    secondaryColorInput.value = normalizeCharacterColor(actionTarget.dataset.characterSecondaryColor, "#d7b56d");
+    if (saveButton) saveButton.textContent = "Save character";
+    if (cancelButton) cancelButton.hidden = false;
+    displayNameInput.focus();
+    document.querySelector(".character-panel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
+
+  if (action === "cancel-character-edit") {
+    const recordInput = document.querySelector("#character-record-id-input");
+    const displayNameInput = document.querySelector("#character-display-name-input");
+    const dialogIdInput = document.querySelector("#character-dialog-id-input");
+    const mainColorInput = document.querySelector("#character-main-color-input");
+    const secondaryColorInput = document.querySelector("#character-secondary-color-input");
+    const saveButton = document.querySelector("#save-character-button");
+    if (recordInput) recordInput.value = "";
+    if (displayNameInput) displayNameInput.value = "";
+    if (dialogIdInput) dialogIdInput.value = "";
+    if (mainColorInput) mainColorInput.value = "#8f5f35";
+    if (secondaryColorInput) secondaryColorInput.value = "#d7b56d";
+    if (saveButton) saveButton.textContent = "Add character";
+    actionTarget.hidden = true;
+    return;
+  }
+
   if (action === "add-character") {
     const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
-    const name = document.querySelector("#character-name-input")?.value.trim() ?? "";
-    if (!name) {
-      state.saveStatus = "Enter a character name first.";
+    const editingRecordId = document.querySelector("#character-record-id-input")?.value ?? "";
+    const displayName = document.querySelector("#character-display-name-input")?.value.trim() ?? "";
+    const dialogId = document.querySelector("#character-dialog-id-input")?.value.trim() ?? "";
+    if (!displayName || !dialogId) {
+      state.saveStatus = "Enter both a display name and a dialogue ID.";
       return render();
     }
-    if (/[:\]]/.test(name)) {
-      state.saveStatus = "Character names cannot contain : or ].";
+    if (!/^[a-z0-9_-]+$/i.test(dialogId)) {
+      state.saveStatus = "Dialogue IDs can only contain letters, numbers, hyphens, and underscores.";
       return render();
     }
 
@@ -4431,17 +4564,55 @@ document.addEventListener("click", async (event) => {
       document.querySelector("#character-secondary-color-input")?.value,
       "#d7b56d",
     );
-    const characterKey = normalizeCharacterKey(name);
-    const existing = (chapter.characters ?? []).find((character) => normalizeCharacterKey(character.name) === characterKey);
+    const characterKey = normalizeCharacterKey(dialogId);
+    const duplicate = (chapter.characters ?? []).find(
+      (character) => character.id !== editingRecordId
+        && normalizeCharacterKey(character.dialogId ?? character.name) === characterKey,
+    );
+    if (duplicate) {
+      state.saveStatus = `The dialogue ID ${dialogId} is already used by another character.`;
+      return render();
+    }
+
+    const existing = editingRecordId
+      ? (chapter.characters ?? []).find((character) => character.id === editingRecordId)
+      : null;
+    if (editingRecordId && !existing) {
+      state.saveStatus = "That character is no longer available. Reload and try again.";
+      return render();
+    }
+
+    const previousDialogId = existing?.dialogId ?? existing?.name ?? "";
+    if (existing && normalizeCharacterKey(previousDialogId) !== characterKey) {
+      const bodyInput = document.querySelector("#chapter-body-input");
+      if (bodyInput instanceof HTMLTextAreaElement) {
+        bodyInput.value = bodyInput.value.replace(
+          new RegExp(`(\\[dialog:\\s*)${escapeRegExp(previousDialogId)}(?=\\s*(?::|\\]))`, "gi"),
+          `$1${dialogId}`,
+        );
+        bodyInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+
     const characters = existing
       ? (chapter.characters ?? []).map((character) => (
-        character.id === existing.id ? { ...character, name, mainColor, secondaryColor } : character
+        character.id === existing.id
+          ? { ...character, dialogId, displayName, mainColor, secondaryColor }
+          : character
       ))
-      : [...(chapter.characters ?? []), { id: makeClientId("character"), name, mainColor, secondaryColor }];
+      : [...(chapter.characters ?? []), {
+        id: makeClientId("character"),
+        dialogId,
+        displayName,
+        mainColor,
+        secondaryColor,
+      }];
 
     state.editorCharacters = characters;
     await state.adapter.updateChapter(chapter.id, await getChapterEditorPatch(chapter, { characters }));
-    state.saveStatus = existing ? `${name}'s colors were updated.` : `${name} was added to this chapter.`;
+    state.saveStatus = existing
+      ? `${displayName}'s character settings and dialogue references were updated.`
+      : `${displayName} was added with the dialogue ID ${dialogId}.`;
     return render();
   }
 
@@ -4451,9 +4622,9 @@ document.addEventListener("click", async (event) => {
       state.saveStatus = "Dialogue markers can only be inserted in Markdown Mode.";
       return render();
     }
-    const name = actionTarget.dataset.characterName ?? "Character";
-    insertTextIntoTextarea(textarea, `[dialog: ${name}] `);
-    state.saveStatus = `Inserted a dialogue block for ${name}.`;
+    const dialogId = actionTarget.dataset.characterId ?? "character";
+    insertTextIntoTextarea(textarea, `[dialog: ${dialogId}] `);
+    state.saveStatus = `Inserted a dialogue block for ${dialogId}.`;
     const statusNode = document.querySelector(".notice.mono");
     if (statusNode) {
       statusNode.textContent = state.saveStatus;
@@ -4462,11 +4633,11 @@ document.addEventListener("click", async (event) => {
   }
 
   if (action === "copy-dialog-marker") {
-    const name = actionTarget.dataset.characterName ?? "Character";
-    const marker = `[dialog: ${name}] `;
+    const dialogId = actionTarget.dataset.characterId ?? "character";
+    const marker = `[dialog: ${dialogId}] `;
     try {
       await copyTextToClipboard(marker);
-      state.saveStatus = `Copied dialogue marker for ${name}.`;
+      state.saveStatus = `Copied dialogue marker for ${dialogId}.`;
     } catch (error) {
       state.saveStatus = `Copy failed. Use this marker manually: ${marker}`;
     }

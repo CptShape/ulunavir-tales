@@ -1206,7 +1206,7 @@ textarea::placeholder {
 
 .character-form {
   display: grid;
-  grid-template-columns: minmax(190px, 1fr) minmax(120px, auto) minmax(120px, auto) auto;
+  grid-template-columns: minmax(190px, 1fr) minmax(130px, 0.65fr) minmax(120px, auto) minmax(120px, auto) auto;
   gap: 12px;
   align-items: end;
 }
@@ -1229,6 +1229,16 @@ textarea::placeholder {
   width: 46px;
   height: 34px;
   padding: 2px;
+}
+
+.character-form-actions {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.character-form-actions > button {
+  white-space: nowrap;
 }
 
 .character-list {
@@ -1333,6 +1343,70 @@ textarea::placeholder {
   border-radius: 12px;
   border: 1px solid var(--line);
   background: #140f0d;
+}
+
+.asset-animated-media {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 50% 38%, rgba(201, 169, 113, 0.16), transparent 42%),
+    #140f0d;
+}
+
+.asset-animated-media canvas,
+.asset-animated-media .asset-animated-live {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.asset-animated-media canvas {
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.asset-animated-media.has-still canvas {
+  opacity: 1;
+}
+
+.asset-animated-media .asset-animated-live {
+  z-index: 1;
+  aspect-ratio: auto;
+  object-fit: cover;
+  border: 0;
+  border-radius: 0;
+  opacity: 0;
+  background: transparent;
+}
+
+.asset-animated-media.is-playing.is-live-ready .asset-animated-live {
+  opacity: 1;
+}
+
+.asset-animation-badge {
+  position: absolute;
+  left: 7px;
+  bottom: 7px;
+  z-index: 2;
+  padding: 4px 7px;
+  border: 1px solid rgba(225, 193, 119, 0.26);
+  border-radius: 999px;
+  background: rgba(20, 15, 13, 0.78);
+  color: var(--gold-bright);
+  font-size: 0.66rem;
+  line-height: 1;
+  pointer-events: none;
+  backdrop-filter: blur(7px);
+}
+
+.asset-animated-media.is-playing .asset-animation-badge {
+  opacity: 0;
 }
 
 .asset-list {
