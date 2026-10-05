@@ -1,3 +1,5 @@
+import { isAdminToken } from "../shared/permissions.js";
+
 let firebaseAdminPromise;
 
 function getFirebaseAdmin() {
@@ -221,7 +223,7 @@ async function handleRequest(request) {
 
     const tokenEmail = normalizeEmail(decodedToken.email);
     const editorEmails = (story.editorEmails ?? []).map(normalizeEmail);
-    const canEdit = story.creatorId === decodedToken.uid || (tokenEmail && editorEmails.includes(tokenEmail));
+    const canEdit = isAdminToken(decodedToken) || story.creatorId === decodedToken.uid || (tokenEmail && editorEmails.includes(tokenEmail));
     if (!canEdit) {
       return jsonResponse(403, { error: "You do not have permission to announce this chapter." }, cors.headers);
     }

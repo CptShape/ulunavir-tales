@@ -1,5 +1,6 @@
 import { createDataAdapter } from "./data.js";
 import { getRuntimeConfig, initializeFirebase } from "./firebase.js";
+import { isAdminEmail } from "../shared/permissions.js";
 
 const appRoot = document.querySelector("#app");
 
@@ -281,6 +282,15 @@ function isOwner(story) {
   return Boolean(story?.creatorId && getUser()?.id && story.creatorId === getUser().id);
 }
 
+function isAdmin() {
+  const authUser = state.authClient?.auth?.currentUser;
+  return Boolean(authUser?.emailVerified && isAdminEmail(authUser.email));
+}
+
+function canManageStory(story) {
+  return isOwner(story) || isAdmin();
+}
+
 function normalizeEmail(value) {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -318,7 +328,7 @@ function isStoryEditor(story) {
 }
 
 function canEditStory(story) {
-  return isOwner(story) || isStoryEditor(story);
+  return canManageStory(story) || isStoryEditor(story);
 }
 
 function canReadStory(story) {
@@ -2585,7 +2595,9 @@ async function renderCreator() {
 
   if (userEmail) {
     try {
-      editorStories = await state.adapter.listEditorStories?.(userEmail) ?? [];
+      editorStories = isAdmin()
+        ? await state.adapter.listAllStories()
+        : await state.adapter.listEditorStories?.(userEmail) ?? [];
     } catch (error) {
       console.error("Editor story list failed:", error);
       state.loadError = "Editor permissions could not be loaded right now.";
@@ -2651,7 +2663,7 @@ async function renderCreator() {
           <div class="section-header">
             <div>
               <h3>Editor Permission</h3>
-              <p class="muted">Stories where the author has added you as an editor.</p>
+              <p class="muted">${isAdmin() ? "All stories available through your administrator access." : "Stories where the author has added you as an editor."}</p>
             </div>
             <span class="pill">${editorStories.length} story(s)</span>
           </div>
@@ -2701,7 +2713,7 @@ function renderStoryCard(story, options = {}) {
       <div class="entity-card-meta">
         <span class="pill">${story.arcs.length} arc(s)</span>
       </div>
-      ${options.authorView ? `
+      ${options.authorView || (options.editorView && isAdmin()) ? `
         <div class="entity-card-actions" aria-label="Story actions">
           <button class="small-button chapter-icon-button danger-icon" title="Delete story" aria-label="Delete story" data-action="delete-story" data-story-id="${story.id}">🗑</button>
         </div>
@@ -2811,7 +2823,7 @@ async function renderStoryPage(storyId) {
     return renderMissing("Story not found.");
   }
 
-  const owner = isOwner(story);
+  const owner = canManageStory(story);
   const editable = canEditStory(story);
   const browserView = getRouteQuery().get("view") === "browser";
   const transferPanelOpen = getRouteQuery().get("transfer") === "1";
@@ -3672,7 +3684,9 @@ async function showTransferChapterModal({ chapterId, currentStoryId, currentArcI
     return render();
   }
 
-  const stories = await state.adapter.listCreatorStories(user.id);
+  const stories = isAdmin()
+    ? await state.adapter.listAllStories()
+    : await state.adapter.listCreatorStories(user.id);
   if (!stories.length) {
     state.saveStatus = "You need at least one story before moving chapters.";
     return render();

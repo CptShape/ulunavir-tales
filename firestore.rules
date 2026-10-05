@@ -5,6 +5,12 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == "yaslantr123@gmail.com";
+    }
+
     function storyDoc(storyId) {
       return get(/databases/$(database)/documents/stories/$(storyId));
     }
@@ -30,13 +36,14 @@ service cloud.firestore {
     }
 
     function canReadStoryById(storyId) {
-      return storyIsSharedById(storyId) || ownsStoryById(storyId) || editsStoryById(storyId);
+      return isAdmin() || storyIsSharedById(storyId) || ownsStoryById(storyId) || editsStoryById(storyId);
     }
 
     function canEditStoryById(storyId) {
       return signedIn()
         && (
-          storyDoc(storyId).data.creatorId == request.auth.uid
+          isAdmin()
+          || storyDoc(storyId).data.creatorId == request.auth.uid
           || editsStoryById(storyId)
           || (
             request.auth.token.email != null
@@ -47,16 +54,16 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read, write: if signedIn() && request.auth.uid == userId;
+      allow read, write: if isAdmin() || (signedIn() && request.auth.uid == userId);
     }
 
     match /stories/{storyId} {
       allow read: if signedIn()
         || resource.data.visibility == "public"
         || resource.data.visibility == "unlisted";
-      allow create: if signedIn() && request.resource.data.creatorId == request.auth.uid;
+      allow create: if isAdmin() || (signedIn() && request.resource.data.creatorId == request.auth.uid);
       allow update: if canEditStoryById(storyId);
-      allow delete: if ownsStoryById(storyId);
+      allow delete: if isAdmin() || ownsStoryById(storyId);
     }
 
     match /arcs/{arcId} {

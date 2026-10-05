@@ -370,6 +370,12 @@ function createLocalAdapter() {
         .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
         .map((story) => storySummary(story));
     },
+    async listAllStories() {
+      const state = loadLocalState();
+      return Object.values(state.stories)
+        .map((story) => storySummary(story))
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    },
     async listBrowserStories() {
       const state = loadLocalState();
       return Object.values(state.stories)
@@ -1138,6 +1144,12 @@ function createFirebaseAdapter(authClient) {
       return storySnapshots.docs
         .map((item) => storySummary({ id: item.id, ...item.data() }))
         .sort((a, b) => a.creatorName.localeCompare(b.creatorName) || a.title.localeCompare(b.title));
+    },
+    async listAllStories() {
+      const storySnapshots = await getDocs(collection(db, "stories"));
+      return storySnapshots.docs
+        .map((item) => storySummary({ id: item.id, ...item.data() }))
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
     },
     async getStory(storyId) {
       return fetchStoryBundle(db, storyId);

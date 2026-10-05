@@ -1,3 +1,5 @@
+import { isAdminToken } from "../shared/permissions.js";
+
 let firebaseAdminPromise;
 
 class HttpError extends Error {
@@ -91,7 +93,7 @@ function requireId(value, label) {
 function canEditStory(story, decodedToken) {
   const email = normalizeEmail(decodedToken.email);
   const editorEmails = (story.editorEmails ?? []).map(normalizeEmail);
-  return story.creatorId === decodedToken.uid || Boolean(email && editorEmails.includes(email));
+  return isAdminToken(decodedToken) || story.creatorId === decodedToken.uid || Boolean(email && editorEmails.includes(email));
 }
 
 async function handleRequest(request) {
