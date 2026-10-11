@@ -164,6 +164,7 @@ function normalizeChapter(chapter) {
         id: character.id ?? makeId("character"),
         dialogId: character.dialogId?.trim() || legacyName,
         displayName: character.displayName?.trim() || legacyName,
+        portraitUrl: character.portraitUrl ?? "",
         mainColor: /^#[0-9a-f]{6}$/i.test(character.mainColor ?? "") ? character.mainColor : "#8f5f35",
         secondaryColor: /^#[0-9a-f]{6}$/i.test(character.secondaryColor ?? "") ? character.secondaryColor : "#d7b56d",
       };

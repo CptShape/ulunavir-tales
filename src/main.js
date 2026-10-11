@@ -1615,10 +1615,14 @@ function renderDialogBlock(dialog, characters) {
   const mainColor = normalizeCharacterColor(character?.mainColor, "#705846");
   const secondaryColor = normalizeCharacterColor(character?.secondaryColor, "#c3a77a");
   const displayName = dialog.displayName?.trim() || character?.displayName || character?.name || dialog.characterName;
+  const portraitUrl = character?.portraitUrl ? getDisplayImageUrl(character.portraitUrl) : "";
   return `
     <blockquote class="dialog-block ${character ? "" : "is-missing"}" style="--dialog-main: ${mainColor}; --dialog-secondary: ${secondaryColor};">
       <div class="dialog-speaker">${escapeHtml(displayName)}</div>
-      <div class="dialog-message">${renderInlineDialogMarkdown(dialog.message)}</div>
+      <div class="dialog-content ${portraitUrl ? "has-portrait" : ""}">
+        ${portraitUrl ? `<img class="dialog-portrait" src="${escapeHtml(portraitUrl)}" alt="${escapeHtml(displayName)}" loading="lazy" />` : ""}
+        <div class="dialog-message">${renderInlineDialogMarkdown(dialog.message)}</div>
+      </div>
     </blockquote>
   `;
 }
@@ -2970,6 +2974,11 @@ function renderCharacterPanel(chapter) {
           <input id="character-record-id-input" type="hidden" value="" />
           <input id="character-display-name-input" placeholder="Display name, for example Julius Vane" />
           <input id="character-dialog-id-input" placeholder="Dialogue ID, for example jv" />
+          <label class="character-portrait-control">
+            <span>Portrait image (optional)</span>
+            <input id="character-portrait-input" type="text" placeholder="Imgur, Pixhost, or direct image URL" />
+            <span class="muted">Displayed as a fixed square in dialogue. Leave empty to remove it.</span>
+          </label>
           <label class="character-color-control">
             <span>Main color</span>
             <input id="character-main-color-input" type="color" value="#8f5f35" />
@@ -3004,12 +3013,13 @@ function renderCharacterPanel(chapter) {
                   <div class="muted mono">ID: ${escapeHtml(dialogId)}</div>
                 </div>
               </div>
+              ${character.portraitUrl ? `<img class="character-portrait-preview" src="${escapeHtml(getDisplayImageUrl(character.portraitUrl))}" alt="Portrait of ${escapeHtml(displayName)}" loading="lazy" />` : ""}
               <div class="muted mono">${escapeHtml(marker)}Hello</div>
               ${markdownMode ? `
                 <div class="card-actions">
                   <button class="small-button" data-action="insert-dialog-marker" data-character-id="${escapeHtml(dialogId)}">Insert dialog</button>
                   <button class="small-button" data-action="copy-dialog-marker" data-character-id="${escapeHtml(dialogId)}">Copy</button>
-                  <button class="small-button" data-action="edit-character" data-character-record-id="${character.id}" data-character-dialog-id="${escapeHtml(dialogId)}" data-character-display-name="${escapeHtml(displayName)}" data-character-main-color="${mainColor}" data-character-secondary-color="${secondaryColor}">Edit</button>
+                  <button class="small-button" data-action="edit-character" data-character-record-id="${character.id}" data-character-dialog-id="${escapeHtml(dialogId)}" data-character-display-name="${escapeHtml(displayName)}" data-character-portrait-url="${escapeHtml(character.portraitUrl ?? "")}" data-character-main-color="${mainColor}" data-character-secondary-color="${secondaryColor}">Edit</button>
                   <button class="small-button danger-icon" title="Delete character" aria-label="Delete character" data-action="delete-character" data-chapter-id="${chapter.id}" data-character-id="${character.id}">🗑</button>
                 </div>
               ` : ""}
@@ -4538,6 +4548,8 @@ document.addEventListener("click", async (event) => {
     recordInput.value = actionTarget.dataset.characterRecordId ?? "";
     displayNameInput.value = actionTarget.dataset.characterDisplayName ?? "";
     dialogIdInput.value = actionTarget.dataset.characterDialogId ?? "";
+    const portraitInput = document.querySelector("#character-portrait-input");
+    if (portraitInput) portraitInput.value = actionTarget.dataset.characterPortraitUrl ?? "";
     mainColorInput.value = normalizeCharacterColor(actionTarget.dataset.characterMainColor, "#8f5f35");
     secondaryColorInput.value = normalizeCharacterColor(actionTarget.dataset.characterSecondaryColor, "#d7b56d");
     if (saveButton) saveButton.textContent = "Save character";
@@ -4557,6 +4569,8 @@ document.addEventListener("click", async (event) => {
     if (recordInput) recordInput.value = "";
     if (displayNameInput) displayNameInput.value = "";
     if (dialogIdInput) dialogIdInput.value = "";
+    const portraitInput = document.querySelector("#character-portrait-input");
+    if (portraitInput) portraitInput.value = "";
     if (mainColorInput) mainColorInput.value = "#8f5f35";
     if (secondaryColorInput) secondaryColorInput.value = "#d7b56d";
     if (saveButton) saveButton.textContent = "Add character";
@@ -4604,6 +4618,16 @@ document.addEventListener("click", async (event) => {
       return render();
     }
 
+    const rawPortraitUrl = document.querySelector("#character-portrait-input")?.value.trim() ?? "";
+    let portraitUrl = "";
+    try {
+      portraitUrl = rawPortraitUrl ? await normalizeExternalImageUrl(rawPortraitUrl) : "";
+    } catch (error) {
+      const statusNode = document.querySelector(".character-syntax");
+      if (statusNode) statusNode.textContent = `Portrait image: ${String(error.message || error)}`;
+      return;
+    }
+
     const previousDialogId = existing?.dialogId ?? existing?.name ?? "";
     if (existing && normalizeCharacterKey(previousDialogId) !== characterKey) {
       const bodyInput = document.querySelector("#chapter-body-input");
@@ -4619,13 +4643,14 @@ document.addEventListener("click", async (event) => {
     const characters = existing
       ? (chapter.characters ?? []).map((character) => (
         character.id === existing.id
-          ? { ...character, dialogId, displayName, mainColor, secondaryColor }
+          ? { ...character, dialogId, displayName, portraitUrl, mainColor, secondaryColor }
           : character
       ))
       : [...(chapter.characters ?? []), {
         id: makeClientId("character"),
         dialogId,
         displayName,
+        portraitUrl,
         mainColor,
         secondaryColor,
       }];

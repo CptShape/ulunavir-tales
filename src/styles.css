@@ -1206,9 +1206,27 @@ textarea::placeholder {
 
 .character-form {
   display: grid;
-  grid-template-columns: minmax(190px, 1fr) minmax(130px, 0.65fr) minmax(120px, auto) minmax(120px, auto) auto;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   align-items: end;
+}
+
+.character-portrait-control {
+  display: grid;
+  grid-column: 1 / -1;
+  order: 1;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.character-portrait-preview {
+  display: block;
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border: 1px solid var(--character-secondary);
+  border-radius: 8px;
 }
 
 .character-color-control {
@@ -1780,8 +1798,36 @@ textarea::placeholder {
 }
 
 .dialog-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--parchment);
   font-size: 1.02em;
+}
+
+.dialog-content {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+  min-width: 0;
+}
+
+.dialog-content.has-portrait {
+  grid-template-columns: 80px minmax(0, 1fr);
+}
+
+.markdown-preview .dialog-portrait {
+  display: block;
+  width: 80px;
+  height: 80px;
+  min-width: 80px;
+  max-width: 80px;
+  aspect-ratio: 1;
+  object-fit: cover;
+  align-self: start;
+  margin: 0;
+  border: 1px solid var(--dialog-secondary);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
 }
 
 .dialog-block.is-missing {
@@ -1862,6 +1908,18 @@ textarea::placeholder {
 }
 
 @media (max-width: 720px) {
+  .dialog-content.has-portrait {
+    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .markdown-preview .dialog-portrait {
+    width: 64px;
+    height: 64px;
+    min-width: 64px;
+    max-width: 64px;
+  }
+
   .soundtrack-settings {
     grid-template-columns: 1fr;
   }
