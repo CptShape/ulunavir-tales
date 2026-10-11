@@ -1595,6 +1595,52 @@ function normalizeCharacterColor(value, fallback) {
   return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
 }
 
+function mergeImportedCharacters(text, existingCharacters) {
+  const payload = JSON.parse(text);
+  if (payload?.format !== "ulunavir-characters" || payload.version !== 1 || !Array.isArray(payload.characters)) {
+    throw new Error("Paste a character export from Ulunavir Tales.");
+  }
+  const characters = existingCharacters.map((character) => ({ ...character }));
+  const importedKeys = new Set();
+  let added = 0;
+  let updated = 0;
+  for (const entry of payload.characters) {
+    if (!entry || typeof entry !== "object") throw new Error("Invalid character entry.");
+    const dialogId = typeof entry.dialogId === "string" ? entry.dialogId.trim() : "";
+    const displayName = typeof entry.displayName === "string" ? entry.displayName.trim() : "";
+    const key = normalizeCharacterKey(dialogId);
+    if (!dialogId || /[:\[\]\r\n]/.test(dialogId) || !displayName) {
+      throw new Error("Every character needs a valid Dialogue ID and Display Name.");
+    }
+    if (importedKeys.has(key)) throw new Error(`Duplicate Dialogue ID in import: ${dialogId}`);
+    importedKeys.add(key);
+    if (!/^#[0-9a-f]{6}$/i.test(entry.mainColor ?? "") || !/^#[0-9a-f]{6}$/i.test(entry.secondaryColor ?? "")) {
+      throw new Error(`Invalid colors for ${displayName}.`);
+    }
+    const portraitUrl = typeof entry.portraitUrl === "string" ? entry.portraitUrl.trim() : "";
+    if (portraitUrl && !/^https?:\/\//i.test(portraitUrl)) {
+      throw new Error(`Invalid portrait URL for ${displayName}.`);
+    }
+    const index = characters.findIndex((character) => normalizeCharacterKey(character.dialogId ?? character.name) === key);
+    const character = {
+      id: index >= 0 ? characters[index].id : makeClientId("character"),
+      dialogId,
+      displayName,
+      mainColor: entry.mainColor,
+      secondaryColor: entry.secondaryColor,
+      portraitUrl,
+    };
+    if (index >= 0) {
+      characters[index] = character;
+      updated += 1;
+    } else {
+      characters.push(character);
+      added += 1;
+    }
+  }
+  return { characters, added, updated };
+}
+
 function buildDialogCharacterMap(characters = []) {
   return new Map(characters.map((character) => [normalizeCharacterKey(character.dialogId ?? character.name), {
     ...character,
@@ -2967,7 +3013,23 @@ function renderCharacterPanel(chapter) {
           <h3>Characters</h3>
           <p class="muted">Create reusable speaker colors for dialogue in this chapter.</p>
         </div>
-        <span class="pill">${characters.length} character(s)</span>
+        <div class="card-actions">
+          <span class="pill">${characters.length} character(s)</span>
+          <button class="small-button" type="button" data-action="export-characters" ${characters.length ? "" : "disabled"}>Export</button>
+          <button class="small-button" type="button" data-action="open-character-import">Import</button>
+        </div>
+      </div>
+      <div id="character-transfer-status" class="muted" role="status"></div>
+      <div id="character-import-panel" hidden>
+        <div class="stack">
+          <label for="character-import-input">Paste exported characters</label>
+          <textarea id="character-import-input" rows="6" placeholder="Paste the character export from your clipboard here."></textarea>
+          <p class="muted">Matching Dialogue IDs update existing characters. Other characters are kept.</p>
+          <div class="card-actions">
+            <button class="ghost-button" type="button" data-action="import-characters" data-chapter-id="${chapter.id}">Import characters</button>
+            <button class="small-button" type="button" data-action="cancel-character-import">Cancel</button>
+          </div>
+        </div>
       </div>
       ${markdownMode ? `
         <div class="character-form">
@@ -4531,6 +4593,67 @@ document.addEventListener("click", async (event) => {
     });
     state.saveStatus = "Arc details saved.";
     return render();
+  }
+
+  if (action === "export-characters") {
+    const status = document.querySelector("#character-transfer-status");
+    const payload = {
+      format: "ulunavir-characters",
+      version: 1,
+      characters: state.editorCharacters.map((character) => ({
+        dialogId: character.dialogId ?? character.name,
+        displayName: character.displayName ?? character.name,
+        mainColor: character.mainColor,
+        secondaryColor: character.secondaryColor,
+        portraitUrl: character.portraitUrl ?? "",
+      })),
+    };
+    try {
+      await copyTextToClipboard(JSON.stringify(payload, null, 2));
+      if (status) status.textContent = `${payload.characters.length} character(s) copied to clipboard.`;
+    } catch (error) {
+      if (status) status.textContent = `Export failed: ${String(error.message || error)}`;
+    }
+    return;
+  }
+
+  if (action === "open-character-import") {
+    const panel = document.querySelector("#character-import-panel");
+    const input = document.querySelector("#character-import-input");
+    if (!panel || !input) return;
+    panel.hidden = false;
+    input.focus();
+    if (!input.value && navigator.clipboard?.readText) {
+      try {
+        input.value = await navigator.clipboard.readText();
+      } catch (error) {
+        // Manual paste remains available when clipboard access is denied.
+      }
+    }
+    return;
+  }
+
+  if (action === "cancel-character-import") {
+    const panel = document.querySelector("#character-import-panel");
+    if (panel) panel.hidden = true;
+    return;
+  }
+
+  if (action === "import-characters") {
+    const status = document.querySelector("#character-transfer-status");
+    try {
+      const chapter = await state.adapter.getChapter(actionTarget.dataset.chapterId);
+      const text = document.querySelector("#character-import-input")?.value.trim() ?? "";
+      const result = mergeImportedCharacters(text, chapter.characters ?? []);
+      await state.adapter.updateChapter(chapter.id, await getChapterEditorPatch(chapter, {
+        characters: result.characters,
+      }));
+      state.saveStatus = `Characters imported: ${result.added} added, ${result.updated} updated.`;
+      return render();
+    } catch (error) {
+      if (status) status.textContent = `Import failed: ${String(error.message || error)}`;
+    }
+    return;
   }
 
   if (action === "edit-character") {
