@@ -1105,6 +1105,18 @@ textarea::placeholder {
 .editor-pane,
 .preview-pane {
   padding: 24px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
+.editor-pane:focus-visible,
+.preview-pane:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: -3px;
 }
 
 .editor-pane {
@@ -1326,6 +1338,8 @@ textarea::placeholder {
 .markdown-area {
   min-height: 420px;
   resize: vertical;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   line-height: 1.7;
 }
 
@@ -1933,6 +1947,38 @@ textarea::placeholder {
   }
 }
 
+@media (min-width: 1041px) {
+  .content.is-chapter-editor {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .content.is-chapter-editor > .stack {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .content.is-chapter-editor > .stack > :not(.editor-shell) {
+    flex-shrink: 0;
+  }
+
+  .content.is-chapter-editor > .notice {
+    flex-shrink: 0;
+  }
+
+  .editor-shell {
+    flex: 1;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 1040px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1982,5 +2028,11 @@ textarea::placeholder {
   .editor-pane {
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  .editor-pane,
+  .preview-pane {
+    max-height: 70vh;
+    max-height: 70dvh;
   }
 }

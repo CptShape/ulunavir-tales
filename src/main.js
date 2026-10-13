@@ -2285,6 +2285,7 @@ function renderQuickTools(content = "") {
 }
 
 function layout(content, activeTab, quickToolsContent = "") {
+  const chapterEditor = content.includes('class="editor-shell"');
   const user = getUser();
   const readerSettings = getReaderSettings(user);
   const readerStyle = `--reader-font-size:${readerSettings.fontSize}px;--reader-line-height:${readerSettings.lineHeight};--reader-width:${readerSettings.width}px;`;
@@ -2333,7 +2334,7 @@ function layout(content, activeTab, quickToolsContent = "") {
           </button>
         </div>
       </aside>
-      <main class="content">${content}</main>
+      <main class="content ${chapterEditor ? "is-chapter-editor" : ""}">${content}</main>
       ${renderQuickTools(quickToolsContent)}
     </div>
   `;
@@ -3472,7 +3473,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
   const editorContent = editable && !browserView
     ? `
         <div class="editor-shell">
-          <section class="editor-pane">
+          <section class="editor-pane" tabindex="0" aria-label="Chapter editor controls">
             <div class="editor-controls">
               <div class="editor-import-bar">
                 <div class="card-actions">
@@ -3549,7 +3550,7 @@ async function renderChapterPage(storyId, arcId, chapterId) {
               <div class="notice mono">${escapeHtml(state.saveStatus || "Tip: use `![alt](image-url)` to place pasted external images into the chapter body.")}</div>
             </div>
           </section>
-          <section class="preview-pane">
+          <section class="preview-pane" tabindex="0" aria-label="Chapter preview">
             <h3>Preview</h3>
             ${renderChapterStats(chapter)}
             <div class="markdown-preview" data-preview-mode="${renderMode}">${renderChapterBody(chapter, "*Start writing to preview your chapter here.*", { showMusicCues: true })}</div>
